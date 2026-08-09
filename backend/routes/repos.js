@@ -6,11 +6,18 @@ const { generateReadme } = require('../services/openai');
 const { queueAnalysis }        = require('../services/analysisQueue');
 const { queueDeepAnalysis }    = require('../services/deepAnalysisQueue');
 const { getInstallationRepos, getInstallationToken } = require('../services/githubApp');
+const { GENERATED_PORTFOLIO_TOPIC } = require('../services/githubPortfolioPublisher');
 
 const router = express.Router();
 
 const GITHUB_API = 'https://api.github.com';
 const README_MAX_REPO_SIZE_KB = 5120; // skip README fetch if repo > 5 MB
+
+// Repos carrying GENERATED_PORTFOLIO_TOPIC are output this platform generated
+// (markdown/narrative), not a source project — they must never be re-imported
+// for deep code analysis. Constant lives in githubPortfolioPublisher.js
+// (the module that actually stamps it) so there's one source of truth.
+const isGeneratedPortfolio = (topics) => Array.isArray(topics) && topics.includes(GENERATED_PORTFOLIO_TOPIC);
 
 function makeGithubHeaders(userToken) {
   const token = userToken || process.env.GITHUB_TOKEN;
@@ -93,6 +100,7 @@ function mapGithubRepo(r, accountUsername) {
     pushedAt:        r.pushed_at || r.updated_at,
     sizeKb:          r.size,
     accountUsername,
+    isPortfolioExport: isGeneratedPortfolio(r.topics),
   };
 }
 
@@ -188,13 +196,16 @@ router.get('/', authMiddleware, async (req, res) => {
     const extraErrors = extraResults.filter(r => r && r.error);
     const extraRepos  = extraResults.filter(Array.isArray).flat();
 
-    const repos = [...primaryRepos, ...secondaryRepos, ...installationRepos, ...extraRepos]
+    const allFetched = [...primaryRepos, ...secondaryRepos, ...installationRepos, ...extraRepos];
+    const repos = allFetched
+      .filter(r => !r.isPortfolioExport)
       .sort((a, b) => new Date(b.repoUpdatedAt) - new Date(a.repoUpdatedAt));
+    const excludedGeneratedPortfolios = allFetched.length - repos.length;
 
     return res.status(200).json({
       success: true,
       data: repos,
-      meta: { count: repos.length, extraErrors },
+      meta: { count: repos.length, extraErrors, excludedGeneratedPortfolios },
     });
   } catch (err) {
     console.error('[repos] list error:', err.message);
@@ -311,7 +322,8 @@ router.get('/imported', authMiddleware, async (req, res) => {
     const [rows, countRow] = await Promise.all([
       pool.query(
         `SELECT id, name, full_name, description, primary_language, stars_count,
-                forks_count, topics, sync_status, imported_at, repo_updated_at
+                forks_count, topics, sync_status, imported_at, repo_updated_at,
+                provider, is_portfolio_export
          FROM repositories
          WHERE user_id = $1
          ORDER BY imported_at DESC
@@ -393,6 +405,21 @@ router.post('/import', authMiddleware, async (req, res) => {
       const { data: repo } = await axios.get(`${GITHUB_API}/repos/${owner}/${repoName}`, {
         headers: makeGithubHeaders(ghInfo.github_access_token),
       });
+
+      // Guardrail: never import a repo this platform generated as portfolio
+      // output — it's markdown/narrative, not source code, and analyzing it
+      // as a project produces garbage (see PROGRESS.md M47.3).
+      if (isGeneratedPortfolio(repo.topics)) {
+        await pool.query(
+          `UPDATE import_jobs SET status = 'failed', error_message = $1, completed_at = NOW() WHERE id = $2`,
+          ['This repo is a generated portfolio (not a source project) and cannot be imported for analysis.', jobId]
+        );
+        results.push({
+          fullName, status: 'failed', jobId,
+          error: 'This repo is a generated portfolio (not a source project) and cannot be imported for analysis.',
+        });
+        continue;
+      }
 
       // Fetch README only when repo is small enough to stay within rate limits
       const readmeContent = repo.size < README_MAX_REPO_SIZE_KB

@@ -6,6 +6,7 @@ const authMiddleware = require('../middleware/authMiddleware');
 const { generatePortfolioNarrative, extractLinkedInProfile, generateProjectDescription } = require('../services/openai');
 const { generatePortfolioPdf } = require('../services/pdfGenerator');
 const { TECH_CATEGORIES, TECH_LABELS } = require('../services/techMaps');
+const { publishPortfolioAsGithubRepo } = require('../services/githubPortfolioPublisher');
 
 const router = express.Router();
 const upload  = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024 } });
@@ -740,6 +741,64 @@ router.patch('/:id/publish', authMiddleware, async (req, res) => {
   } catch (err) {
     console.error('[portfolios] publish error:', err.message);
     return res.status(500).json({ success: false, error: { code: 'SERVER_ERROR', message: 'Failed to publish portfolio.' } });
+  }
+});
+
+// POST /api/portfolios/:id/publish-github-repo — publish this portfolio as a
+// GitHub repo of markdown (ported from Portfolioforge, see M47.1/M52). One-way
+// terminal export only — reuses the user's own GitHub OAuth token (already
+// has `repo` scope), never Portfolioforge's separate/retired OAuth flow.
+// Idempotent: re-running with the same repoName upserts the same repo/files
+// rather than creating a duplicate.
+router.post('/:id/publish-github-repo', authMiddleware, async (req, res) => {
+  const { id: userId } = req.user;
+  const { id } = req.params;
+  const { repoName } = req.body;
+
+  if (!repoName || typeof repoName !== 'string' || !/^[a-zA-Z0-9._-]+$/.test(repoName)) {
+    return res.status(400).json({
+      success: false,
+      error: { code: 'VALIDATION_ERROR', message: 'repoName is required and may only contain letters, numbers, dots, underscores, and hyphens.' },
+    });
+  }
+
+  try {
+    const userResult = await pool.query(
+      'SELECT github_username, github_access_token FROM users WHERE id = $1',
+      [userId]
+    );
+    const { github_username: owner, github_access_token: token } = userResult.rows[0] || {};
+    if (!owner || !token) {
+      return res.status(400).json({
+        success: false,
+        error: { code: 'NO_GITHUB_CONNECTED', message: 'Connect your GitHub account before publishing.' },
+      });
+    }
+
+    const portfolioResult = await pool.query(
+      'SELECT id, content_json FROM portfolios WHERE id = $1 AND user_id = $2',
+      [id, userId]
+    );
+    if (!portfolioResult.rows[0]) {
+      return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Portfolio not found.' } });
+    }
+
+    const narrative = portfolioResult.rows[0].content_json?.narrative;
+    if (!narrative) {
+      return res.status(400).json({
+        success: false,
+        error: { code: 'NO_NARRATIVE', message: 'Generate the portfolio narrative before publishing.' },
+      });
+    }
+    const profile = portfolioResult.rows[0].content_json?.profile || {};
+
+    const { repoUrl, created } = await publishPortfolioAsGithubRepo({ token, owner, repoName, narrative, profile });
+
+    return res.status(200).json({ success: true, data: { repoUrl, created } });
+  } catch (err) {
+    const status = err.response?.status === 422 ? 409 : 500;
+    console.error('[portfolios] publish-github-repo error:', err.message);
+    return res.status(status).json({ success: false, error: { code: 'SERVER_ERROR', message: err.message } });
   }
 });
 

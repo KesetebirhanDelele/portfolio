@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import AnalysisPanel from './AnalysisPanel'
 import PortfolioBuilder from './PortfolioBuilder'
+import ColaberryLiveLogin from './ColaberryLiveLogin'
 import { authFetch, BASE_URL } from './api'
 import { RepoCardSkeleton } from './Skeleton'
 
@@ -86,6 +87,8 @@ function Header({ onLogout }) {
   const [analyzingFullNames, setAnalyzingFullNames]   = useState(new Set())
   const [autoImporting, setAutoImporting]             = useState(false)
   const [autoImportError, setAutoImportError]         = useState(null)
+  const [showColaberryLogin, setShowColaberryLogin]   = useState(false)
+  const [colaberryBanner, setColaberryBanner]         = useState(null)
   const [cameFromAutoImport, setCameFromAutoImport]   = useState(false)
   const [publicImporting, setPublicImporting]         = useState(null)  // username being auto-imported
   const [privateImporting, setPrivateImporting]       = useState(null)  // username being auto-imported (private)
@@ -785,8 +788,60 @@ function Header({ onLogout }) {
                       <p className="text-xs text-violet-400 mt-0.5">OAuth · auto-imports top 10 repos</p>
                     </div>
                   </button>
+
+                  {/* Connect Colaberry account — embedded live browser, see PROGRESS.md M48/M49 */}
+                  <button
+                    onClick={() => setShowColaberryLogin(true)}
+                    className="flex items-center gap-2.5 px-3 py-2.5 rounded-xl border border-dashed border-emerald-200 bg-emerald-50/50 hover:bg-emerald-50 hover:border-emerald-300 transition text-left"
+                  >
+                    <div className="w-8 h-8 rounded-full bg-emerald-100 flex items-center justify-center flex-shrink-0">
+                      <svg className="w-4 h-4 text-emerald-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+                      </svg>
+                    </div>
+                    <div>
+                      <p className="text-xs font-semibold text-emerald-700">Connect Colaberry</p>
+                      <p className="text-xs text-emerald-400 mt-0.5">Import your Colaberry projects</p>
+                    </div>
+                  </button>
                 </div>
               </div>
+            )}
+
+            {colaberryBanner && (
+              <div className="mb-4 px-4 py-3 rounded-xl border border-emerald-200 bg-emerald-50 text-emerald-800 text-sm font-medium flex items-center justify-between">
+                <span>{colaberryBanner}</span>
+                <button onClick={() => setColaberryBanner(null)} className="text-emerald-400 hover:text-emerald-600">×</button>
+              </div>
+            )}
+
+            {showColaberryLogin && (
+              <ColaberryLiveLogin
+                onComplete={async () => {
+                  setShowColaberryLogin(false)
+                  setColaberryBanner('Colaberry account connected — importing your projects…')
+                  try {
+                    const res = await authFetch(`${BASE_URL}/api/colaberry-import`, { method: 'POST' })
+                    const body = res ? await res.json() : null
+                    if (!body?.success && body?.data?.imported?.length === 0 && body?.data?.failed?.length === 0) {
+                      setColaberryBanner('Connected — no Colaberry projects found for your account.')
+                    } else if (!body?.success) {
+                      setColaberryBanner(`Import failed: ${body?.error?.message || 'Unknown error.'}`)
+                    } else {
+                      const { imported, failed } = body.data
+                      setColaberryBanner(
+                        `Imported ${imported.length} Colaberry project${imported.length === 1 ? '' : 's'}` +
+                        (failed?.length ? ` (${failed.length} failed)` : '') + '.'
+                      )
+                      setAnalyzingFullNames(prev => new Set([...prev, ...imported.map(p => p.title)]))
+                      fetchImportedReposAndMaybeAutoImport()
+                    }
+                  } catch (err) {
+                    setColaberryBanner(`Import failed: ${err.message}`)
+                  }
+                }}
+                onCancel={() => setShowColaberryLogin(false)}
+              />
             )}
 
             {/* SEARCH */}

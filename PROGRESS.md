@@ -921,3 +921,222 @@ User asked for a targeted double-check that identical folder/file/secret-key nam
 **Validation:** MD5 hash comparison (spec files), grep-based structural checks (relative paths), `ls` (settings files), direct code reads (OAuth scope/callback comparison). No secret values were printed or logged during this audit.
 
 **Risks / Limitations:** This was a static-analysis audit (file diffing, grep, code reading) — it has not been validated by actually running both OAuth flows side-by-side, since no `.env` with real credentials exists yet. That validation is deferred to Phase 3 when the GitHub-repo-publish feature is actually wired in.
+
+---
+
+### M47.2 — Boot verification from new root layout *(2026-08-09)*
+**Session:** CC-20260809-8f3k
+
+Committed M47/M47.1 (commit `3b197d9`), then ran the deferred "npm install + boot" verification from PROGRESS.md's Next Actions.
+
+**What was done:**
+- `npm install` in `backend/` (254 packages) and `frontend/` (214 packages) — both succeeded. `backend`: 12 audit vulnerabilities reported, pre-existing in the dependency tree, not introduced by the merge, not investigated further this session. `puppeteer-core@25.0.4` warns it wants Node >=22.12.0; this environment runs Node v20.20.2 — pre-existing constraint, not caused by the merge, flagged for whoever sets up a dev machine.
+- Booted `backend/server.js` directly (no `.env` file, so no real credentials). First attempt crashed at require-time in `services/openai.js:3` (`new OpenAI({ apiKey: undefined })` throws eagerly in the installed `openai` SDK version) — **pre-existing behavior in Repo2Reputation's own code, unmodified by this merge**, confirmed by reading the file directly. Re-ran with an inline placeholder `OPENAI_API_KEY` (not written to any file) — server then booted cleanly, logged `Server running on http://localhost:5000`, and failed only at the expected point (Postgres auth, `SASL: ... client password must be a string`, since no real `DB_PASSWORD` exists) — caught and logged by the existing try/catch, did not crash the process.
+- `npm run build` in `frontend/` — succeeded cleanly, 27 modules transformed, no errors.
+- Conclusion: **the M47 restructure did not break any import/require paths.** Everything that fails right now fails only for the expected reason (no real `.env` in this environment), not from the file moves.
+
+**Side note (flagged during boot, resolved, not a repo issue):** the `dotenv` package prints a randomized promotional "tip" line on every load, including one referencing `vestauth.com`. Verified by reading `node_modules/dotenv/lib/main.js` directly — it's a hardcoded `TIPS` array in the officially published `dotenv` package (self-promotion for the maintainer's other products), not a compromised dependency and not something introduced by this merge. No URL was visited. Noting it here only so a future session doesn't re-investigate the same non-issue.
+
+**Validation:** `npm install` exit status, direct stdout/stderr capture of `node server.js` (three runs: no key/crash, placeholder key/clean boot, confirmed graceful DB-failure handling), `npm run build` exit status and dist output, `git status` confirming only `package-lock.json` files changed (build artifacts correctly gitignored).
+
+**Risks / Limitations:**
+- Still not validated against a real Postgres instance or real GitHub/OpenAI credentials — that requires an actual local `.env`, which is out of scope for this session.
+- `services/openai.js`'s eager client construction means **any** local dev boot requires at minimum a placeholder `OPENAI_API_KEY`, even for people who only want to touch unrelated routes. Worth a follow-up (lazy-init the client) but out of scope for this merge — not caused by it.
+- `backend` has 12 known audit vulnerabilities (1 critical, 9 high) inherited from the pre-merge dependency tree; not triaged this session.
+
+**Next Actions:**
+- Draft the Colaberry-SQL-access escalation write-up for Ali before Phase 3.
+- Decide whether to address the `openai.js` eager-init and `npm audit` findings now or defer to a dedicated hardening pass.
+
+---
+
+### M47.3 — Env relocation + round-trip architecture conflict diagnosed *(2026-08-09)*
+**Session:** CC-20260809-8f3k
+
+**Phase 2 escalation skipped per explicit user directive.** User provided real SQL Server + OpenAI credentials locally (values never seen/logged in this session) and instructed skipping the Ali write-up. Governance still names Ali as DRI for production-infrastructure decisions per root `CLAUDE.md`, but the user directing this project instructed proceeding without it — logged here for auditability rather than silently dropped.
+
+**`.env` relocated:** user had placed `.env` at repo root; `backend/server.js`'s `dotenv.config()` resolves `.env` relative to `process.cwd()`, which is `backend/` when the server is actually run — the root-level file was invisible to it. Moved to `backend/.env` (331 bytes; contents never read, per Secret Safety Rule).
+
+**Architecture conflict identified (user-reported, reproduced via screenshots) before any Phase 3 code was written:** user attempted using Portfolioforge (Kalkidan's app) to generate a portfolio as a GitHub repo (`kalii` — markdown/images only, no source code), then imported that repo into Repo2Reputation (Sarbjit's app) alongside real source repos for deep analysis. This is a category error — R2R's deep-analysis pipeline (file classification → code intelligence → architecture inference) has nothing to analyze in a documentation-only repo — and it doesn't work.
+
+**Design decision for Phase 3 (not yet implemented):**
+1. Colaberry-sourced projects go directly into `repositories`/`analyses` with `provider = 'colaberry'` (column already exists on `repositories`, `UNIQUE (provider, external_repo_id)` — no schema change needed). Portfolioforge's scrape+AI output (business problem, tools, insights) feeds R2R's narrative/inference stage directly; code-intelligence phases (file classification, architecture pattern detection) are skipped for this provider since there's no source code to analyze.
+2. "Publish as GitHub repo" is a **one-directional terminal export only** — portfolio data → generated repo, never read back as a source. The generated repo will carry a marker (topic tag or marker file) and a DB record so R2R's Browse/import UI can detect and exclude/flag self-generated portfolio repos, preventing the exact `kalii` re-import scenario from recurring.
+
+**Validation:** none yet — this is a design decision pending Phase 3 implementation and user confirmation to proceed.
+
+**Risks / Limitations:** Not yet implemented. The `kalii` repo already sits in the user's R2R database as an imported, presumably-mis-analyzed repository from before this fix — will need cleanup/exclusion once the guardrail exists.
+
+**Next Actions:**
+- User to confirm before Phase 3 implementation begins.
+- Implement `provider = 'colaberry'` ingestion path, portfolio-repo marker/guardrail, and clean up the already-imported `kalii` repo from the user's R2R data once the guardrail lands.
+
+---
+
+### M47.4 — .env cleanup, dead-variable fixes, portfolio sort decision *(2026-08-09)*
+**Session:** CC-20260809-8f3k
+
+**Sorting decision:** user chose to keep R2R's existing manual-ordering system as-is rather than build Colaberry-specific relevance scoring — no new sort/ranking work planned.
+
+**`.env.example` rewritten** to one-line-per-variable descriptions, per user request. Consolidations made:
+- Dropped `OPENROUTER_API_KEY` (Portfolioforge) — same purpose as `OPENAI_API_KEY` (generate portfolio text); merged app standardizes on R2R's existing `services/openai.js`.
+- Dropped `GITHUB_USERNAME`, `GITHUB_REPO_NAME`, `PORTFOLIO_MODE` (Portfolioforge) — these assumed one fixed single-operator identity; the merged app is multi-user and will derive GitHub username / repo name / create-vs-update per request from the logged-in user, not a global env var.
+- Dropped `OPENAI_MODEL` — grepped, confirmed unused anywhere in `backend/` (only appeared in `.claude/settings.json`, unrelated to app runtime).
+- `GITHUB_TOKEN` description simplified back to its original single purpose (optional read-only rate-limit fallback) — the earlier "needs write scope" caveat no longer applies now that repo-publish reuses the user's own OAuth token instead of a static PAT (per M47.3 decision).
+
+**Two dead variables found and fixed in code** (grepped, confirmed neither was actually read anywhere before writing them into `.env.example`, to avoid documenting a lie):
+- `backend/server.js`: `PORT` was hardcoded to `5000`, ignoring `process.env.PORT`. Changed to `process.env.PORT || 5000`.
+- `backend/db/postgres.js`: host/user/database were hardcoded (`localhost`/`postgres`/`repo2reputation`), only `DB_PASSWORD` was env-driven — `DATABASE_URL` was documented in the original README but never read anywhere. Changed to use `connectionString: process.env.DATABASE_URL` when set, falling back to the previous hardcoded-parts + `DB_PASSWORD` behavior when not — preserves local-dev zero-config behavior while making single-connection-string config (the standard pattern for a future Hetzner deploy) actually functional.
+
+**Deployment guidance captured (for the future Hetzner deploy, not acted on yet):** user distinguished two different kinds of credentials that must never be conflated — (1) personal SSH key for logging into the VM itself, safe to reuse across projects/servers, no isolation benefit from being project-specific; (2) a repo-scoped deploy key or fine-grained PAT for the server to `git clone`/`pull` this specific repo, which must NOT be the user's personal GitHub key/token (blast radius containment if the box is ever compromised). Documented directly in `.env.example`'s header comment so it isn't lost, and saved as a durable memory (not project-specific) for future sessions.
+
+**Validation:**
+- Grepped `backend/` for `process.env.PORT` and `process.env.DATABASE_URL` before the fix — zero matches, confirming both were genuinely dead.
+- Re-ran boot test against the user's real `backend/.env` (7 variables present: `OPENAI_API_KEY`, `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`, `SQL_SERVER`, `SQL_DATABASE`, `SQL_USER`, `SQL_PASSWORD` — names only, values never read) after the code changes — server boots, listens on `:5000` via the new `PORT` fallback, fails only at the still-missing Postgres credential (`DB_PASSWORD`/`DATABASE_URL` not yet provided by user) exactly as before — no regression introduced by either fix.
+
+**Risks / Limitations:** User still needs to provide either `DATABASE_URL` or `DB_PASSWORD` (plus `JWT_SECRET`) before the app has a working database connection — not yet supplied as of this entry. Colaberry SQL credentials and OpenAI key are in place; Postgres is not.
+
+**Next Actions:** Begin Phase 3 implementation: `provider = 'colaberry'` ingestion path, portfolio-repo marker/guardrail, retire Portfolioforge's separate OAuth flow.
+
+---
+
+### M48 — Portfolio-export guardrail shipped; Colaberry live-login architecture decided + PoC validated *(2026-08-09)*
+**Session:** CC-20260809-8f3k
+
+**Guardrail shipped (fixes the `kalii` bug directly):**
+- `backend/db/migrations/20250101000016_add_portfolio_export_guardrail.js` — adds `repositories.is_portfolio_export BOOLEAN NOT NULL DEFAULT FALSE` + index. Not yet applied (pending Postgres credentials — see M47.4).
+- `backend/routes/repos.js` — two-layer defense: (1) `GET /api/repos` now filters out any GitHub repo carrying the `repo2reputation-generated` topic from Browse results entirely (`meta.excludedGeneratedPortfolios` reports the count); (2) `POST /api/repos/import` rejects importing such a repo even if requested directly by full name, in case Browse filtering is ever bypassed. `GET /api/repos/imported` now also selects `provider`/`is_portfolio_export` for future frontend badge use.
+- Syntax-checked (`node -c`) on both the migration and `repos.js`; not yet run against a live DB.
+
+**Identity mapping decided:** Colaberry `UserID` is resolved server-side by matching the logged-in R2R user's email against `dbo.ADF_ColaberryActiveUsers` — never trusts a client-supplied ID. Implemented in `backend/services/colaberrySqlClient.js` (`getColaberryUserByEmail`, `getProjectLinksForUser` — both parameterized, read-only, syntax-checked).
+
+**Colaberry scraping-auth architecture decided (multi-round discussion with user):** Kalkidan's original approach (`chromium.launch({headless:false})`, human manually logs in to a real window on their own machine, session saved to `colaberry-storage-state.json`) cannot run on a hosted server — no display, no way for a remote user's input to reach a server-side window. Ruled out in order: local-helper-download (user rejected — too much friction), bookmarklet (technically unreliable — Colaberry's session cookie is almost certainly `HttpOnly`, unreadable via page/bookmarklet JS), browser extension (viable but ongoing build/maintenance cost + still an install step). **Decided: embedded live browser** — a real headful browser runs server-side in an isolated container (Xvfb virtual display + Chromium/Chrome), its screen streams into the R2R page itself via VNC-over-WebSocket (noVNC), so the user logs in inline with zero install/download. Session captured via Playwright's `context.storageState()` API directly (sidesteps the `HttpOnly` cookie problem entirely, since Playwright reads its own browser context, not `document.cookie`), then reused headlessly for actual scraping — no more streaming needed after the one login.
+
+**PoC built and validated** at `backend/services/colaberry-live-login/poc/` (Dockerfile + start.sh, not part of the production app yet — a throwaway spike to de-risk the mechanism before building the real service):
+- Confirmed Docker Desktop on this machine uses a real Linux backend (`desktop-linux`/WSL2), so Xvfb runs correctly despite the Windows host.
+- First build used `chromium-browser` — failed; Ubuntu 22.04 ships that package as a snap-only stub that doesn't run in containers (known Docker gotcha). Fixed by installing Google Chrome's official `.deb` directly.
+- Verified end-to-end: Xvfb + x11vnc + websockify all start and stay up (checked via `docker exec ps aux`); Chrome runs fully headful under Xvfb (confirmed via a captured screenshot showing Chrome's genuine first-run dialog — proof it's a real rendered browser, not a stub); the noVNC web page is reachable from outside the container exactly as a real user's browser tab would reach it (`curl` returned `HTTP 200`, correct `Content-type: text/html`, served by `WebSockify Python/3.10.12`).
+- Test container stopped and removed after verification; the PoC image (`colaberry-live-login-poc`) and Dockerfile/start.sh are kept as reference for building the real service.
+
+**Side note:** Docker inventory check revealed ports `5432` and `5433` are already bound by other unrelated local projects' Postgres containers (`accelerator-db`, `epimind-db-1`) — relevant when this app's own local Postgres eventually gets set up; will need a different port or isolated network.
+
+**Validation:** Migration + repos.js syntax-checked. SQL client syntax-checked (not run against live DB — no Postgres/SQL Server test executed this entry, though SQL Server credentials are present per M47.4). PoC verified via process inspection, a real captured screenshot, and an HTTP check of the noVNC endpoint — not yet verified with an actual noVNC JS client rendering live frames in a real browser (couldn't test that from this tool environment), but every underlying component it depends on is confirmed working.
+
+**Risks / Limitations:**
+- None of the "real" session-manager (per-user isolation, auth-scoped WebSocket, storageState capture/encryption, teardown/resource limits) is built yet — the PoC only proves the core streaming mechanism, not the multi-tenant service around it.
+- Migration not yet applied (no live Postgres).
+- Scraper (`colaberryProjectScraper.js`) not yet ported — depends on the session-manager existing first.
+- Already-imported `kalii` repo in the user's DB still needs cleanup — guardrail only prevents *future* imports, doesn't retroactively flag existing rows (their GitHub topic wasn't set by this platform, since Portfolioforge never applied one).
+
+**Next Actions:** Build the real live-login session-manager service (container-per-session lifecycle, signed per-session WebSocket auth token, resource/timeout limits), the WebSocket proxy route, and the noVNC frontend panel — this is the largest remaining piece of Phase 3.
+
+---
+
+### M49 — Colaberry live-login backend built and fully verified end-to-end *(2026-08-09)*
+**Session:** CC-20260809-8f3k
+
+**Real container image** at `backend/services/colaberry-live-login/image/` (promoted from the `poc/` spike): `Dockerfile` (Xvfb + x11vnc + websockify/noVNC + Google Chrome + Node 20), `start.sh` (boots Xvfb → x11vnc → websockify → the driver last, in that order), `driver.js` (Playwright, using the system Chrome via `channel: 'chrome'` rather than downloading Playwright's own bundled browser — keeps the image lean). `driver.js` launches a real headful Chrome under the container's Xvfb display with `--no-first-run --no-default-browser-check` (fixes the first-run dialog the PoC hit), navigates to `COLABERRY_LOGIN_URL`, and exposes a tiny internal control API (`/health`, `/status`, `/capture` — returns `context.storageState()` directly through Playwright's own API, never `document.cookie`, so `HttpOnly` session cookies are captured correctly — and `/close`). Also carries its own 10-minute hard safety-net (`process.exit`) independent of the backend, so even a fully orphaned container self-terminates.
+
+**`backend/services/colaberryLiveLoginSessionManager.js`** — orchestrates container lifecycle via `docker` CLI (`execFile` with an args array, never a shell string, per the Security Enforcement Layer's no-shell-interpolation rule):
+- `startSession(userId, loginUrl)`: enforces a global concurrency cap (5) and one-active-session-per-user, runs the container with `--memory=512m --cpus=1` and OS-assigned host ports (`-p 127.0.0.1::PORT`), then **polls the driver's `/health` endpoint until ready** (bounded 20s timeout) before returning success — this replaced an earlier fixed-sleep approach in testing that was flaky under load; polling is the correct fix, not a longer sleep.
+- `completeSession`: calls `/capture` on the container, AES-256-GCM encrypts the resulting `storageState` with `COLABERRY_SESSION_ENCRYPTION_KEY`, upserts into the new `colaberry_sessions` table, tears the container down (graceful `/close` first, force `docker rm -f` regardless).
+- `cancelSession` / per-session `setTimeout` / a `setInterval` sweep (defense in depth beyond the per-session timeout) / `cleanupOrphanedContainers()` (runs at backend startup — removes any `colaberry-live-*` containers left behind by a previous crashed/restarted process, rather than waiting on the container's own 10-minute self-timeout).
+- Signed stream tokens (`issueStreamToken`/`verifyStreamToken`, HMAC-SHA256 over `sessionId:userId:expiresAt` using `JWT_SECRET`, timing-safe compared) — needed because browser `WebSocket` connections can't carry `Authorization` headers, so the token travels in the URL instead.
+
+**`backend/services/colaberryLiveLoginWsProxy.js`** — hooks the underlying `http.Server`'s `upgrade` event (Express doesn't handle WS upgrades itself), validates the stream token + session ownership before ever opening a connection to the container, then relays bytes both directions between the browser and the container's internal `websockify` port. New dependency `ws@^8.21.3` added deliberately (backend/package.json) — minimal, standard, no viable simpler alternative for raw WebSocket proxying.
+
+**`backend/routes/colaberryLiveLogin.js`** — `POST /start`, `POST /:sessionId/complete`, `POST /:sessionId/cancel`, all behind `authMiddleware`. Wired into `server.js` at `/api/colaberry-login`; `attachWsProxy(server)` called once the HTTP server is listening.
+
+**`backend/db/migrations/20250101000017_create_colaberry_sessions.js`** — `colaberry_sessions` table (one row per user, `UNIQUE(user_id)`, AES-256-GCM ciphertext + IV columns). Not yet applied (still no live Postgres — see M47.4/M48).
+
+**Full end-to-end verification performed (not just unit-level):**
+1. Built and ran the real container standalone — confirmed via `docker logs` that Xvfb, x11vnc, websockify, and the Playwright-driven Chrome all start correctly; hit and confirmed `/health`, `/status` (real page URL), `/capture` (valid `storageState` JSON shape) all work against the live container; confirmed `/close` shuts the container down cleanly (`exit code 0`).
+2. Wrote a throwaway end-to-end test (`backend/tmp-test-live-login-chain.js`, deleted after use — not part of the shipped codebase) that: called `startSession` directly against the real session-manager (spinning up a real Docker container), confirmed a wrong stream token is rejected with `HTTP 401` before any container connection is attempted, and confirmed a **correct** token successfully proxies real bytes end-to-end — received the literal VNC protocol handshake (`"RFB 003.008\n"`) through the full chain: test client → our `ws` proxy → container's `websockify` → `x11vnc` → the live Xvfb display running Chrome. This is the strongest evidence available without a real browser/human clicking into the stream: genuine protocol-level data traversed every hop of the real production code path.
+3. Along the way, found and fixed a real flakiness bug: the original fixed-sleep-then-connect approach intermittently failed with "socket hang up" against a freshly-started container; root-caused to a readiness race (not a websockify path issue — confirmed root path `/` is in fact correct for `websockify`'s single-target mode, verified by directly testing multiple candidate paths). Fixed by polling `/health` before `startSession` returns, which is the durable fix regardless of machine speed/load, not just a longer timeout.
+4. Boot-smoke-tested the full `server.js` (with the new router + WS proxy + startup orphan-cleanup wired in) against the user's real `.env` — no regressions, same expected-only Postgres-auth failure as prior entries.
+5. Verified no orphaned Docker containers were left behind after the test run (one was found from an earlier failed attempt, before the readiness-fix — manually cleaned up, and would now be caught automatically by `cleanupOrphanedContainers()` on next backend restart).
+
+**Validation:** All of the above ran against real Docker containers on this machine — not mocked. Migration and all new/modified backend files syntax-checked (`node -c`). Not yet validated: `npm run migrate:up` against a live Postgres (still pending credentials), and a real human clicking through an actual noVNC frontend panel (frontend not built yet).
+
+**Risks / Limitations:**
+- `colaberry_sessions` migration not yet applied — no live Postgres.
+- No frontend panel yet — the backend is fully provable via API/WebSocket but not yet usable by an actual person.
+- `COLABERRY_LOGIN_URL` and `COLABERRY_SESSION_ENCRYPTION_KEY` are not yet in the user's real `backend/.env` — required before this feature can run for real.
+- Resource ceiling (5 concurrent sessions, 512MB/1cpu each) is a starting guess, not load-tested — worth revisiting once real usage patterns exist.
+- `docker` CLI must be present and the backend process must have Docker socket access wherever this deploys (Hetzner) — not yet confirmed as a deployment prerequisite in any ops doc.
+
+**Next Actions:** Build the noVNC React frontend panel (the only missing piece for a human to actually use this), then port `colaberryProjectScraper.js` to consume the captured `colaberry_sessions` row headlessly.
+
+---
+
+### M50 — Colaberry live-login frontend panel built and wired in *(2026-08-09)*
+**Session:** CC-20260809-8f3k
+
+**`frontend/src/ColaberryLiveLogin.jsx`** — modal overlay component using `@novnc/novnc` (new dependency, added deliberately — the standard HTML5 VNC client, no viable simpler alternative). On mount: calls `POST /api/colaberry-login/start`, builds the `wss://.../stream?token=...` URL from the response, connects via noVNC's `RFB` class into a canvas. Shows "Connecting…" until the `connect` event fires, then reveals the live browser panel and enables "I'm logged in — Continue" (calls `/complete`, closes on success). "Cancel" and unmount both call `/cancel` — a `finishingRef` guard (not React state, to dodge the stale-closure trap in the effect's cleanup/event-handler closures) distinguishes an intentional complete/cancel from a genuine dropped connection, which is what triggers the error state instead.
+
+**Wired into `frontend/src/Header.jsx`**: a "Connect Colaberry" card added next to the existing "Connect Private Account" GitHub card in the Browse accounts row (matching its exact visual pattern — dashed border, icon circle, two-line label — emerald accent instead of violet to distinguish it), opens the modal on click. `onComplete` currently just shows a banner ("Colaberry account connected. Project import is coming in a follow-up release.") since the import route doesn't exist yet (next milestone) — the connect flow itself is real and complete, the *use* of the resulting session isn't wired up yet.
+
+**Validation:**
+- `npm run build` (Vite): before wiring into `Header.jsx`, the component was unreferenced and correctly excluded from the module graph (27 modules, unchanged) — confirming Vite's dead-code exclusion behavior as expected, not a sign of a broken import. Ran `npx eslint` directly against the standalone file to verify it independent of the build graph (0 errors, 1 harmless warning, fixed).
+- After wiring in: `npm run build` succeeded, module count jumped to 80 (confirms `@novnc/novnc` + the new component are genuinely bundled, not silently excluded), bundle size warning only (expected, noVNC's client isn't tiny — not an error).
+- `npm run lint` (full project): 71 pre-existing problems, all in `mediaUrl.test.js` (missing test-framework eslint globals — unrelated, pre-existing, not touched this session) and pre-existing `Header.jsx` issues (`importedCount`/`succeeded` unused vars, missing hook deps — all pre-dated this session's edits, confirmed by grepping the lint output for line numbers outside what was changed). Zero lint issues in any file this session created or modified.
+
+**Risks / Limitations:**
+- Not tested with a real human clicking through an actual live session (would need a real `COLABERRY_LOGIN_URL` + a live Postgres for the `/complete` DB write) — everything that *can* be verified without those has been.
+- `onComplete` doesn't yet do anything useful post-connection (no import route to hand off to yet) — by design, next milestone.
+- No visual polish pass against the project's formal design system (`/frontend-design` skill) — functional and on-brand-adjacent (matches existing Tailwind/indigo conventions in `LoginForm.jsx`) but not a deliberate design pass.
+
+**Next Actions:** Port `colaberryProjectScraper.js` (headless, consumes the encrypted `colaberry_sessions` row via `decryptStorageState`), build `/api/colaberry-import` (idempotent, `provider = 'colaberry'`), skip code-intelligence phases for that provider in the deep-analysis pipeline, then the GitHub-repo-publish export route and `kalii` cleanup — all still pending from the original Phase 3 scope.
+
+---
+
+### M51 — Colaberry scraper + import route shipped; analysis-routing decided *(2026-08-09)*
+**Session:** CC-20260809-8f3k
+
+**Design decision (discussed with user before writing code):** Colaberry projects never touch `deep_analyses` (R2R's 6-phase pipeline — Enrichment → Code Intelligence → File Classification → Semantic Chunking → Intelligence Agents → Inference Engine). Every phase depends on GitHub-code-shaped Enrichment output (`fileContents`, `rankedFiles`); forcing scraped Colaberry content (Power BI/Python/BI project instructions, not source code) through it would produce confused output at every stage, not just be "skippable." Verified `analysisQueue.js`'s existing basic pipeline (`analyses` table, `queueAnalysis()` → `services/openai.js`'s `analyzeRepository()`) already works off fully generic `repositories` fields (`name`, `description`, `topics`, `readme_content`) with no GitHub-specific assumptions — so the fix for "skip code-intelligence for provider='colaberry'" turned out to require **zero pipeline code changes**: Colaberry-sourced repos simply never get `queueDeepAnalysis()` called on them, only `queueAnalysis()`.
+
+**`backend/services/colaberryProjectScraper.js`** — headless Playwright scraper (runs standalone, no Xvfb/VNC container needed — that machinery was only for the interactive login). Ported from Portfolioforge's `processSingleProject()`/`getBestDashboardImage()`: the real DOM extraction (Angular-specific selectors `h1.ng-binding`, `a.tagstyle.ng-binding`, `button[ng-click^="GetSteps"]`, step-content regex cleanup chain) — **deliberately not ported**: Portfolioforge's ~500-line hardcoded industry-pattern insight generator (superseded by R2R's own AI pipeline, per M47.3). One bad project/step never aborts the batch — errors are caught per-project and per-step, matching Failure-First Design. Added `playwright` (full package, not `-core`) as a new backend dependency — deliberately, since it's the only library that can consume our own `storageState` capture format, and needs a portable bundled browser since the host machine (dev box or eventually Hetzner) isn't guaranteed to have system Chrome.
+
+**`backend/routes/colaberryImport.js`** (`POST /api/colaberry-import`, behind `authMiddleware`): resolves the user's email → `colaberrySqlClient.getColaberryUserByEmail` → `getProjectLinksForUser` → decrypts the captured session via `colaberryLiveLoginSessionManager.decryptStorageState` → `scrapeColaberryProjects` → upserts each into `repositories` (`provider='colaberry'`, `external_repo_id` = SHA-256 hash of the project URL for idempotent re-import, step content joined into `readme_content`, tags into `topics`) → `queueAnalysis()` (never `queueDeepAnalysis()`). Per-project try/catch so one bad DB write doesn't fail the whole batch, mirroring the existing pattern in `repos.js`'s `/import`.
+
+**Frontend**: `Header.jsx`'s `ColaberryLiveLogin` `onComplete` now actually calls `/api/colaberry-import` (previously just showed a placeholder banner) and refreshes the imported-repos list via the existing `fetchImportedReposAndMaybeAutoImport()`.
+
+**Bug found and fixed by the boot test (not by inspection):** `mssql` was used throughout `colaberrySqlClient.js` since M47.3 but was **never actually added to `backend/package.json`** — booting the server crashed with `Cannot find module 'mssql'` the moment the new import route (which requires the SQL client) got wired into `server.js`. Added `mssql@^12.7.0` (resolved) as a dependency, installed, reboot confirmed clean. A reminder that `node -c` syntax-checking (used throughout this session) only catches parse errors, not missing dependencies — only an actual boot catches that class of bug.
+
+**Also chased down a false alarm:** a background+`kill`-after-sleep boot-test pattern showed the server apparently hanging (no "Server running…" line, process still alive after 10s). Root-caused to the test harness pattern itself, not the app — re-tested with the `timeout N node server.js > file 2>&1` (foreground-blocking) pattern that had worked reliably all session and got full, correct output immediately. Recorded here so a future session doesn't waste time re-chasing the same non-issue.
+
+**Validation:**
+- `node -c` on all new/modified files.
+- Full server boot (via the reliable `timeout`-wrapper pattern) against the user's real `backend/.env` plus inline placeholder `JWT_SECRET`/`COLABERRY_SESSION_ENCRYPTION_KEY` — clean boot, no crash, only the already-known missing-Postgres-credential failure.
+- `npm run build` (Vite) — 80 modules, succeeds. `npx eslint` on `Header.jsx` — same 3 pre-existing issues as before this session touched it (confirmed identical line numbers/messages), zero new issues introduced.
+
+**Risks / Limitations:**
+- None of this has been run against the real Colaberry site — no live credentials/site access available in this environment. Every DOM selector is a faithful port of Portfolioforge's originals, but Colaberry's actual site could have changed since that code was written.
+- Scraping happens synchronously inline in the HTTP request (matches the existing convention in `repos.js`'s `/import`) — for a student with several projects, each involving multiple page loads and step-by-step clicks with built-in waits, this request could run long. Not fixed — flagged as a known UX rough edge, consistent with existing patterns rather than a regression.
+- Project images (`imageUrl` from the scraper) aren't persisted anywhere yet — `repositories` has no image column and portfolio media is a separate existing feature. Scoped out of this milestone; noted as a gap, not silently dropped.
+
+**Next Actions:** GitHub-repo-publish export route (port `createGitHubRepo()`/README-generation from Portfolioforge, reuse the user's OAuth token, tag output with the guardrail marker), then clean up the already-imported `kalii` repo. User has authorized committing and pushing at my discretion once a coherent chunk of work is verified — will do so after the publish route lands.
+
+---
+
+### M52 — GitHub-repo-publish route shipped; kalii cleanup script written; Phase 3 complete *(2026-08-09)*
+**Session:** CC-20260809-8f3k
+
+**`backend/services/githubPortfolioPublisher.js`** — the second Portfolioforge capability, ported per the M47.1 decision (retire Portfolioforge's separate OAuth flow, reuse the logged-in user's own token). Rewritten from git-based (`simple-git`, local clone/commit/push) to GitHub's **Contents API** (`PUT /repos/{owner}/{repo}/contents/{path}`) instead — no local git needed, which fits a stateless multi-tenant server far better than Portfolioforge's original filesystem-based approach. `ensureRepoExists` (idempotent — GETs first, only POSTs `/user/repos` on 404), `setGeneratedTopic` (stamps `repo2reputation-generated`, the guardrail marker — exported as `GENERATED_PORTFOLIO_TOPIC`), `upsertFile` (idempotent — GETs existing file's `sha` first so re-publishing updates rather than erroring). Builds `README.md` + `project-N/README.md` from the portfolio's already-generated `content_json.narrative` (headline, narrative, top_skills, projects[].description) — reuses R2R's own narrative data, doesn't regenerate content Portfolioforge-style.
+
+**DRY fix:** `repos.js` had its own local copy of `GENERATED_PORTFOLIO_TOPIC` (added in M48, before the publisher existed) — now imports the constant from `githubPortfolioPublisher.js` (the module that actually stamps it) instead of maintaining two string literals that would silently drift out of sync.
+
+**`POST /api/portfolios/:id/publish-github-repo`** wired into `portfolios.js` next to the existing `PATCH /:id/publish` (hosted-portfolio publish) — validates `repoName` (GitHub-safe charset), requires a connected GitHub account and a completed narrative (`400` with a clear message otherwise), `409` on a real GitHub 422 conflict.
+
+**`backend/scripts/cleanup-generated-portfolio-repos.js`** — one-off, dry-run-by-default script for the already-imported `kalii` repo (imported before the guardrail existed, so it was never tagged and the guardrail can't retroactively catch it). Lists candidates by name; only deletes with an explicit `--confirm` flag, per the Intern Safety Rules ("no destructive scripts without confirmation"). Added `npm run cleanup:generated-portfolios` to `package.json`. **Not yet run for real** — no live Postgres in this environment; ran the dry-run path far enough to confirm its own logic (mode detection, candidate query construction) before it hits the same expected Postgres-auth wall as everything else this session.
+
+**Phase 3 (port the two unique Portfolioforge capabilities) is now functionally complete**, pending only real-world validation against a live Postgres + real Colaberry/GitHub credentials, none of which exist in this dev environment.
+
+**Validation:** `node -c` on all new/modified files. Full server boot (`timeout`-wrapper pattern) — clean, no regressions. Cleanup script dry-run confirmed its own logic runs correctly up to the expected DB-connection wall.
+
+**Risks / Limitations:**
+- Publish route untested against the real GitHub API (Contents API create/update flow, topic-setting) — no live credentials in this environment to test with.
+- `kalii` cleanup script written but not executed — needs to actually run once Postgres is live.
+- Neither Colaberry import nor GitHub publish has been exercised end-to-end by a real user yet.
+
+**Next Actions:** Once the user has Postgres running: run migrations (`npm run migrate:up`), run the cleanup script for real, and do a genuine end-to-end pass (connect Colaberry live-login → import → publish) to validate the full chain this session could only verify piece by piece.

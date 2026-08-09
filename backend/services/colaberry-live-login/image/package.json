@@ -1,0 +1,10 @@
+{
+  "name": "colaberry-live-login-driver",
+  "version": "1.0.0",
+  "private": true,
+  "main": "driver.js",
+  "dependencies": {
+    "express": "^4.19.2",
+    "playwright-core": "^1.47.2"
+  }
+}

@@ -11,9 +11,13 @@ const analysisRouter        = require('./routes/analysis');
 const deepAnalysisRouter    = require('./routes/deepAnalysis');
 const portfoliosRouter      = require('./routes/portfolios');
 const searchRouter          = require('./routes/search');
+const colaberryLiveLoginRouter = require('./routes/colaberryLiveLogin');
+const colaberryImportRouter = require('./routes/colaberryImport');
+const { attachWsProxy }     = require('./services/colaberryLiveLoginWsProxy');
+const { cleanupOrphanedContainers } = require('./services/colaberryLiveLoginSessionManager');
 
 const app = express();
-const PORT = 5000;
+const PORT = process.env.PORT || 5000;
 
 app.use(cors());
 app.use(express.json());
@@ -27,13 +31,19 @@ app.use('/api/analysis',       analysisRouter);
 app.use('/api/deep-analysis',  deepAnalysisRouter);
 app.use('/api/portfolios', portfoliosRouter);
 app.use('/api/search',     searchRouter);
+app.use('/api/colaberry-login', colaberryLiveLoginRouter);
+app.use('/api/colaberry-import', colaberryImportRouter);
 
 app.get('/', (req, res) => {
   res.send('Backend is running');
 });
 
-app.listen(PORT, async () => {
+const server = app.listen(PORT, async () => {
   console.log(`Server running on http://localhost:${PORT}`);
+  attachWsProxy(server);
+  cleanupOrphanedContainers().catch(err =>
+    console.error('[startup] orphaned live-login container cleanup failed:', err.message)
+  );
 
   // Resume any analyses that were queued/running when the server last stopped
   try {
