@@ -1,0 +1,16 @@
+-- Migration: create sessions table for JWT refresh token management
+-- Run manually: psql -d repo2reputation -f backend/db/migrations/001_create_sessions_table.sql
+
+CREATE TABLE sessions (
+  id                 SERIAL PRIMARY KEY,
+  user_id            INTEGER   NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  refresh_token_hash TEXT      NOT NULL,
+  ip_address         TEXT,
+  user_agent         TEXT,
+  expires_at         TIMESTAMP NOT NULL,
+  revoked_at         TIMESTAMP,
+  created_at         TIMESTAMP NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX idx_sessions_user_id ON sessions(user_id);
+CREATE INDEX idx_sessions_refresh_token_hash ON sessions(refresh_token_hash);

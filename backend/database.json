@@ -1,0 +1,9 @@
+{
+  "dev": {
+    "host": "localhost",
+    "database": "repo2reputation",
+    "user": "postgres",
+    "password": { "ENV": "DB_PASSWORD" },
+    "port": "5432"
+  }
+}
