@@ -63,7 +63,7 @@ function buildPhaseImpls(token) {
 async function fetchRepo(repositoryId, userId) {
   const result = await pool.query(
     `SELECT id, name, full_name, description, primary_language, default_branch,
-            topics, stars_count, forks_count, readme_content
+            topics, stars_count, forks_count, readme_content, provider
      FROM repositories WHERE id = $1 AND user_id = $2`,
     [repositoryId, userId]
   );
@@ -71,11 +71,13 @@ async function fetchRepo(repositoryId, userId) {
 }
 
 // Queue a deep analysis for one repository.
-// Skips silently if one is already queued or running.
-// Returns { analysisId, queued } or null if repo not found.
+// Skips silently if one is already queued or running, or if the repo isn't
+// GitHub-sourced (deep analysis is code-shaped; see PROGRESS.md M47.3/M54).
+// Returns { analysisId, queued } or null if repo not found / not applicable.
 async function queueDeepAnalysis(repositoryId, userId) {
   const repoData = await fetchRepo(repositoryId, userId);
   if (!repoData) return null;
+  if (repoData.provider && repoData.provider !== 'github') return null;
 
   const existing = await pool.query(
     `SELECT id, status FROM deep_analyses

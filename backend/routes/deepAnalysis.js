@@ -99,11 +99,30 @@ function buildPhaseImpls(token) {
 async function fetchRepoForUser(repositoryId, userId) {
   const result = await pool.query(
     `SELECT id, name, full_name, description, primary_language, default_branch,
-            topics, stars_count, forks_count, readme_content
+            topics, stars_count, forks_count, readme_content, provider
      FROM repositories WHERE id = $1 AND user_id = $2`,
     [repositoryId, userId],
   );
   return result.rows[0] ?? null;
+}
+
+// Deep analysis (the 6-phase GitHub enrichment pipeline) only makes sense for
+// real GitHub repos — full_name for other providers isn't an "owner/repo"
+// GitHub path, so enrichment would fail confusingly rather than cleanly.
+// Non-GitHub repos (e.g. provider='colaberry') use the basic analysis
+// pipeline instead (services/analysisQueue.js) — see PROGRESS.md M47.3/M54.
+function rejectNonGithubProvider(repoData, res) {
+  if (repoData.provider && repoData.provider !== 'github') {
+    res.status(400).json({
+      success: false,
+      error: {
+        code: 'NOT_APPLICABLE',
+        message: `Deep analysis is only available for GitHub repositories (this repo's source is '${repoData.provider}').`,
+      },
+    });
+    return true;
+  }
+  return false;
 }
 
 // ── POST /api/deep-analysis/run ───────────────────────────────────────────────
@@ -129,6 +148,7 @@ router.post('/run', authMiddleware, async (req, res) => {
         error: { code: 'NOT_FOUND', message: 'Repository not found.' },
       });
     }
+    if (rejectNonGithubProvider(repoData, res)) return;
 
     // Resume orphaned queued row (server may have restarted mid-queue)
     const existing = await pool.query(
@@ -250,6 +270,7 @@ router.post('/:repoId/reanalyze', authMiddleware, async (req, res) => {
         error: { code: 'NOT_FOUND', message: 'Repository not found.' },
       });
     }
+    if (rejectNonGithubProvider(repoData, res)) return;
 
     // Block reanalysis if one is already in flight — prevents duplicate runs
     const inFlight = await pool.query(

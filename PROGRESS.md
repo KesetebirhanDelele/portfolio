@@ -1179,3 +1179,37 @@ Committed M47/M47.1 (commit `3b197d9`), then ran the deferred "npm install + boo
 - The pre-existing duplicate `PHASE_IMPLS` definitions across two files were not consolidated into one (only both converted to the same `buildPhaseImpls(token)` pattern independently) — a further follow-up worth doing, out of scope for this fix.
 
 **Next Actions:** User to log in again via GitHub, retry deep analysis on the previously-failed repos to confirm the per-user token fix resolves the 403s for real, then continue the interrupted Colaberry import test now that Playwright's browser is installed.
+
+---
+
+### M54 — Colaberry import actually succeeded end-to-end; found the real bug was in status display, not the import; live-login UX overhaul *(2026-08-09/10)*
+**Session:** CC-20260809-8f3k
+
+**User hit "Live-login container did not become ready in time" and separately saw Colaberry-imported projects marked "Failed."** Investigated both from evidence, not assumption.
+
+**Finding 1 — the container readiness timeout was too impatient, not broken.** The "failed" container's own logs showed `browser ready, navigated to login URL` — it *did* succeed, just after the 20s `waitForDriverReady` timeout had already given up and thrown. This host has 8+ other Docker containers running (other unrelated projects — `ollama` alone is a 4.76GB image), and under that load, container boot (Xvfb → x11vnc → websockify → Playwright launch → navigate) can genuinely exceed 20s even though it finishes fine. Also found the timeout's cleanup path was silently swallowing `docker rm -f` failures (`.catch(() => {})`, no logging) — exactly the "silent catch" pattern that's supposed to never ship here — which is how an orphaned container (348MB RAM, "Up 3 minutes") was found still running. **Fixed:** timeout raised 20s → 60s with a comment explaining why (`colaberryLiveLoginSessionManager.js`), cleanup failures now logged instead of swallowed, orphaned container removed.
+
+**Finding 2 — the Colaberry import actually worked completely.** Queried the database directly rather than trusting the UI: `Pedal Power: Predicting Washington DC's Bike Demand with Weather Insights` was scraped, imported (`provider='colaberry'`), and its `analyses` row was `status: 'completed'` with a rich, accurate, high-confidence AI summary. **The "Failed" badge was a separate, pre-existing frontend bug**, not an import failure — this is the first real proof the whole Colaberry pipeline built this session (SQL lookup → live-login → scraper → import → basic analysis) works end to end.
+
+**Root cause of the false "Failed" badge:** `PortfolioBuilder.jsx`'s `loadRepos()` calls `GET /api/deep-analysis/:id/latest` for *every* imported repo with no provider check. Colaberry repos never get a `deep_analyses` row (by design — M47.3/M51: they use the basic `analyses` pipeline, not the 6-phase GitHub-code one), so that call always 404s, which the code read as `status: 'pending'`. A separate pre-existing auto-trigger effect then saw "pending" and called `POST /api/deep-analysis/run` on it, which failed — `enrichRepository` tried to `split('/')` a Colaberry project's title as if it were a GitHub `owner/repo` path. Neither of these was introduced this session, but Colaberry is the first case that fully exposes it (any basic-analysis-only repo would hit the same bug).
+
+**Fixed on both ends:**
+- **Backend defense-in-depth** (`routes/deepAnalysis.js`, `services/deepAnalysisQueue.js`): `/run`, `/reanalyze`, and `queueDeepAnalysis` now all reject/no-op for `provider !== 'github'` repos with a clear `NOT_APPLICABLE` message instead of attempting enrichment and failing confusingly. Protects against this same class of bug regardless of what the frontend does.
+- **Frontend fix** (`PortfolioBuilder.jsx`): `loadRepos()` now branches on `repo.provider` — non-GitHub repos check `GET /api/analysis/repo/:id` (the basic-analysis endpoint, which already existed) instead of the deep-analysis endpoint, and populate the same `repoStatusMap`/`analysisMap` shape the UI already reads. The auto-trigger effect also now skips non-GitHub repos explicitly, as a second layer.
+
+**Also fixed, from direct user feedback on the live UI:**
+- Misleading UI: the "Connect Colaberry" button's icon was a checkmark (✓) — visually implying "already connected" regardless of actual state. Swapped to the same lock icon "Connect Private Account" uses, for both accuracy and visual consistency between the two "connect an account" actions.
+- No real-time guidance during the live-login flow — user asked for "instructions that tell you what to do at each step." `ColaberryLiveLogin.jsx` rewritten with a persistent 4-step indicator (Starting → Connecting → Log in → Saving), an elapsed-seconds counter during the wait (directly addresses the "is this frozen?" concern the too-short timeout was creating), and a "Try Again" retry button in the error state (previously only "Cancel" existed — no way to retry without closing and reopening the whole modal).
+
+**Validation:**
+- Root-caused via direct container log inspection and direct database queries (`phase_errors_json`, `analyses.status`, `deep_analyses` row counts) — not assumption, not log-grepping.
+- Syntax-checked all touched backend files; full backend reboot against live Postgres, clean.
+- `npm run build` (80 modules, succeeds) and `npx eslint` on all three touched frontend files — confirmed via `git diff --unified=0` that every reported lint issue falls outside the actual changed line ranges (pre-existing, not introduced).
+- Orphaned container confirmed removed via a fresh `docker ps -a` check.
+
+**Risks / Limitations:**
+- The longer 60s timeout is still a fixed ceiling, not adaptive — under even heavier host load it could theoretically still fire. No mechanism yet to surface "still working, just slow" vs. "actually stuck" beyond the elapsed-seconds counter.
+- Have not yet re-tested the full live-login flow end-to-end after these fixes (timeout increase, retry button) — the Colaberry import success that was found was from a *previous* attempt's data, not a fresh run against the fixed code.
+- The general "basic-analysis-only repos are mishandled by deep-analysis-oriented UI" class of bug is now fixed for the specific paths touched (`loadRepos`, auto-trigger) but wasn't audited across the entire frontend for other places that might assume every repo has gone through `deep_analyses`.
+
+**Next Actions:** User to retry the full Colaberry connect → import flow fresh against the fixed code (longer timeout, correct status display) to confirm the UI now correctly shows it as analyzed rather than failed.

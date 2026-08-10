@@ -30,7 +30,13 @@ async function getAssignedPort(containerId, containerPort) {
   return Number(match[1]);
 }
 
-async function waitForDriverReady(controlHostPort, timeoutMs = 20000) {
+// 60s, not 20s: observed in practice that container boot (Xvfb -> x11vnc ->
+// websockify -> Playwright launch -> navigate to COLABERRY_LOGIN_URL) can
+// exceed 20s under real host load (multiple other Docker containers
+// competing for CPU/disk I/O) even though the container ultimately succeeds
+// fine — a container that "failed" at 20s was still observed healthy and
+// ready 3+ minutes later. See PROGRESS.md M54.
+async function waitForDriverReady(controlHostPort, timeoutMs = 60000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     try {
@@ -86,7 +92,13 @@ async function startSession(userId, loginUrl) {
     // (including the VNC/websocket stack) is actually up, not just Chrome.
     await waitForDriverReady(controlHostPort);
   } catch (err) {
-    await run('docker', ['rm', '-f', containerName]).catch(() => {});
+    // Never silently swallow a cleanup failure — if this container didn't
+    // actually get removed, it becomes an invisible orphan consuming RAM
+    // until its own 10-minute safety-net timeout. Log it so that's
+    // diagnosable instead of a mystery next time.
+    await run('docker', ['rm', '-f', containerName]).catch(cleanupErr =>
+      console.error(`[colaberry-live-login] failed to remove container ${containerName} after startup error:`, cleanupErr.message)
+    );
     throw err;
   }
 

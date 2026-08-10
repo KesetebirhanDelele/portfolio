@@ -488,7 +488,10 @@ function PortfolioBuilder({ onLogout, onGoToBrowse, onRepoDeleted, autoStart = f
     if (loading) return
     if (autoTriggeredRef.current) return
     autoTriggeredRef.current = true
-    const pending = importedRepos.filter(r => repoStatusMap[r.id]?.status === 'pending')
+    // Deep analysis only applies to GitHub repos — see loadRepos() above.
+    const pending = importedRepos.filter(r =>
+      repoStatusMap[r.id]?.status === 'pending' && (!r.provider || r.provider === 'github')
+    )
     if (pending.length === 0) return
     pending.forEach(repo => {
       authFetch(`${BASE_URL}/api/deep-analysis/run`, {
@@ -669,6 +672,33 @@ function PortfolioBuilder({ onLogout, onGoToBrowse, onRepoDeleted, autoStart = f
     const newAnalysisMap = {}
     const newStatusMap   = {}
     await Promise.all(repos.map(async repo => {
+      // Deep analysis (6-phase, code-shaped) only applies to GitHub repos.
+      // Non-GitHub repos (e.g. provider='colaberry') never get a deep_analyses
+      // row by design — check the basic analysis result instead, or they'd
+      // permanently read as "pending" and get wrongly auto-retried as if
+      // deep analysis had failed. See PROGRESS.md M47.3/M54.
+      if (repo.provider && repo.provider !== 'github') {
+        const aRes = await authFetch(`${BASE_URL}/api/analysis/repo/${repo.id}`, {}, onLogout)
+        if (!aRes) return
+        const aJson = await aRes.json()
+        if (aJson?.success) {
+          const a = aJson.data
+          newStatusMap[repo.id] = { status: a.status }
+          if (a.status === 'completed') {
+            newAnalysisMap[repo.id] = {
+              status:          a.status,
+              confidenceScore: a.confidenceScore,
+              technologies:    a.technologies || [],
+              summary:         a.summary || null,
+              highlights:      a.highlights || {},
+            }
+          }
+        } else {
+          newStatusMap[repo.id] = { status: 'pending' }
+        }
+        return
+      }
+
       const dRes = await authFetch(`${BASE_URL}/api/deep-analysis/${repo.id}/latest`, {}, onLogout)
       if (!dRes) return
       const dJson = await dRes.json()
