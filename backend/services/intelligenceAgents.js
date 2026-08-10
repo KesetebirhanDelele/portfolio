@@ -1038,8 +1038,15 @@ async function runPortfolioNarrativeAgent(chunkingData, repoMeta, signals) {
   const differentiation = [];
   if (hasAi && archPatterns.includes('rag_framework'))
     differentiation.push('RAG pipeline shows advanced AI engineering beyond simple LLM API integration');
-  if (hasAi)
-    differentiation.push(`AI/ML integration using ${formatList(technologies.filter(t => AI_TECHS.has(t) && !VECTOR_DB_TECHS.has(t)).map(techLabel), 2)}`);
+  // hasAi is a broader signal (semantic/domain classification of code chunks)
+  // than "one of the specifically-named AI_TECHS was detected" — a repo can
+  // have hasAi=true with no matching named library (e.g. a custom integration,
+  // or the only match was filtered out as a vector DB), which previously
+  // produced a bullet that trailed off with nothing after "using". Only add
+  // this specific bullet when there's an actual name to put in it.
+  const namedAiTechs = technologies.filter(t => AI_TECHS.has(t) && !VECTOR_DB_TECHS.has(t)).map(techLabel);
+  if (hasAi && namedAiTechs.length > 0)
+    differentiation.push(`AI/ML integration using ${formatList(namedAiTechs, 2)}`);
   if (archPatterns.includes('type_safe_api'))
     differentiation.push('End-to-end type safety via tRPC eliminates API contract drift between frontend and backend');
   if (archPatterns.includes('ssr_framework'))

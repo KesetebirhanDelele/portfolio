@@ -367,6 +367,7 @@ router.get('/public/:slug/pdf', async (req, res) => {
       experience:     linkedin.experience  || [],
       education:      linkedin.education   || [],
       certifications: linkedin.certifications || [],
+      resumeSummary:  linkedin.summary || null,
     });
 
     res.setHeader('Content-Type', 'application/pdf');
@@ -720,6 +721,20 @@ router.patch('/:id/publish', authMiddleware, async (req, res) => {
         error: {
           code: 'NARRATIVE_REQUIRED',
           message: 'Narrative generation must be completed before publishing. Current status: ' + (narrativeStatus || 'not started'),
+        },
+      });
+    }
+
+    // Publishing makes this publicly visible — a portfolio can sit as a draft
+    // without a name while still being built, but it can't go live without
+    // one (pdfGenerator/PublicPortfolio both fall back to the portfolio
+    // title, e.g. "My Portfolio", as the displayed person's name otherwise).
+    if (!portfolio.content_json?.profile?.fullName?.trim()) {
+      return res.status(400).json({
+        success: false,
+        error: {
+          code: 'PROFILE_INCOMPLETE',
+          message: 'Add your name in the profile section before publishing.',
         },
       });
     }

@@ -1421,3 +1421,45 @@ Committed M47/M47.1 (commit `3b197d9`), then ran the deferred "npm install + boo
 **Next Actions:** Before ever configuring `GITHUB_APP_SLUG`/`GITHUB_APP_ID`/`GITHUB_APP_PRIVATE_KEY_BASE64` for production, revisit the residual first-claim race noted above and confirm whether a nonce-based binding is warranted at that point.
 
 ---
+
+### M63 — Fixed the real root cause of wrong tech-stack detection (no Python support at all); trailing-off bullet bug; raw repo-slug names; resume-summary priority; mandatory name before publish *(2026-08-10)*
+**Session:** CC-20260809-8f3k
+
+**User provided a detailed, evidence-backed critique of a generated resume blurb for `cora-recap-engine`**: it showed "Express" tech stack for a repo that's actually FastAPI/Python (no root `package.json`, confirmed via `pyproject.toml` + `docker-compose.yml`), plus generic filler ("AI/ML integration using" trailing off with nothing after "using", "10 architectural layers" meaning nothing to a recruiter) and a raw repo-name title. Same message also asked for: (2) mandatory profile fields so a portfolio can't publish nameless, (3) resume-uploaded summary should take priority over the repo-derived one, and (1) ideas on GitHub-publish versioning (addressed separately, see M64/next session).
+
+**Root cause of the Express misdetection, found by tracing the actual matching code, not guessing:** `codeIntelligence.js`'s ~150 detection rules ran against **every** file with zero language/extension gating. The Express CONTENT-level heuristic (`app\.(get|post|put|delete|patch|use)\s*\(`) doesn't check language — it's a plain regex over raw text — so a Python FastAPI route decorator (`@app.get("/path")`) matched it just as well as JS's `app.get(...)`. Worse: **there was no Python detection anywhere in the file at all** (confirmed via grep — zero matches for fastapi/flask/django/uvicorn/pyproject), so a Python repo had no chance of being correctly identified regardless of the Express bug.
+
+**Fixed:**
+- Gated the ambiguous Express content rule to JS/TS file extensions only (`isJsFile()`), closing the false-positive at its source.
+- Extracted `CONFIDENCE`/`DOMAINS` into a new `services/codeIntelligenceConstants.js` (avoids a circular `require()` between the JS and new Python detection modules — the "missing third module" CLAUDE.md's composition rules call for).
+- Added `services/codeIntelligencePython.js`: real detection for FastAPI, Flask, Django (+ DRF), SQLAlchemy, Celery, RQ, Redis, Pydantic, uvicorn/gunicorn, psycopg2/asyncpg→PostgreSQL, PgBouncer, boto3, pytest, and the OpenAI Python SDK — both from `.py` file imports/decorators and (more reliably, since manifest files are always fetched regardless of file-sampling limits) from `pyproject.toml`/`requirements*.txt`/`Pipfile` declarations. Concatenated into the existing `RULES` array — zero changes needed to the pipeline code that consumes it.
+- New file kept separate from the already-1690-line `codeIntelligence.js` rather than growing it further, per CLAUDE.md's Modular Composition Rule (file is grandfathered until touched — Python support is new work, not a touch-in-passing).
+- Added the new technology keys (`fastapi`, `sqlalchemy`, `celery`, `rq`, `pydantic`, `uvicorn`, `gunicorn`, `pgbouncer`, `aws-sdk`, `django-rest-framework`) to `techMaps.js`'s `TECH_CATEGORIES`/`TECH_LABELS` — without this, the new detections would have been silently dropped from the rendered skills list (`if (!TECH_CATEGORIES[t]) continue;` in the narrative-generation route). Also added the corresponding new `architectureSignal` values to `pdfGenerator.js`'s `CI_ARCH_LABELS` so they render as readable capability bullets, not silently omitted.
+
+**Fixed the "AI/ML integration using" trailing-off bug** (`services/intelligenceAgents.js`): `hasAi` is a broad signal (semantic-chunk domain classification), independent of whether any *specifically-named* AI library was detected — so the bullet could fire with an empty filtered technology list, and `formatList([], 2)` returns `''`, producing exactly the observed dangling phrase. Fixed by only pushing the bullet when the filtered list is actually non-empty.
+
+**Fixed raw repo-slug names showing verbatim** (`PublicPortfolio.jsx`'s `formatRepoName`, `pdfGenerator.js`'s `fmtName`): both handled underscores and camelCase but not hyphens, and neither applied Title Case — so `cora-recap-engine` passed through completely unchanged instead of becoming "Cora Recap Engine". Fixed both (independently, no shared module between frontend/backend) to split on hyphens too and Title-Case each word, while preserving already-capitalized/acronym words (`RepoPulse` → `Repo Pulse`, not `Repo pulse`; `API` stays `API`).
+
+**Resume-summary priority** (item 3): neither `pdfGenerator.js` nor `PublicPortfolio.jsx` ever looked at `linkedin.summary` (the "About" section extracted from an uploaded resume PDF) for the Professional Summary — both were 100% repo-derived synthesis. Fixed both to show the resume-sourced summary first (verbatim, in the person's own words) with the repo-derived synthesis following as supporting detail, only when a resume was actually uploaded.
+
+**Mandatory name before publish** (item 2): `PATCH /:id/publish` validated narrative completion but nothing about the profile — a portfolio could go fully public with no name, falling back to the portfolio title (e.g. "My Portfolio") as the displayed person's name. Added a `PROFILE_INCOMPLETE` check requiring `profile.fullName` before the status flips to published. Deliberately scoped to publish-time, not creation-time — a draft can still exist nameless while being built. Added a matching client-side check in `PortfolioBuilder.jsx`'s `handlePublish` (immediate feedback, no round-trip) and a required-field marker + inline hint on the Full Name input.
+
+**Validation (live, against the real running backend — every fix executed, not just read):**
+- Ran `pyproject.toml` content with fastapi/sqlalchemy/redis/celery/psycopg2/uvicorn/pydantic through the real `extractSignalsFromFile()`: correctly returned all seven technologies, zero false Express match.
+- Ran a real FastAPI `.py` file (`@app.get`/`@app.post` decorators) through the same function: `fastapi` detected, **no** `express` — confirmed the false-positive is gone.
+- Ran `docker-compose.yml` with a pgbouncer service + uvicorn command through the pipeline: `pgbouncer` and `uvicorn` both correctly detected.
+- Regenerated a real portfolio's narrative and PDF: `Tech Stack` line and bullets already covered by M61's verification remain intact (no regression).
+- `formatRepoName`/`fmtName` tested against 7 real cases (`cora-recap-engine`, `RepoPulse`, `lead_conversion`, `my-AI-service`, `3 Brothers Retail`, etc.) — all correct.
+- Generated a real PDF with an injected test resume summary: confirmed via extracted PDF text that the resume-sourced paragraph appears first, repo-derived synthesis second. Confirmed the same via the public JSON API response. Test data removed afterward.
+- Built a real throwaway draft portfolio with `narrative_status: 'completed'` and an empty name, hit the actual live `/publish` endpoint: `400 PROFILE_INCOMPLETE`. Set a name, retried: `200`, published successfully. Test portfolio deleted afterward.
+- `npm run build` (frontend, succeeds); `npx eslint` on both touched frontend files — all reported issues confirmed pre-existing via `git diff --unified=0` line-range checks. All touched backend files syntax-checked (`node -c`).
+
+**Risks / Limitations:**
+- The Python detection rule set covers what's evidenced in the user's own rewritten example (FastAPI ecosystem) plus common adjacent tooling — it is not as exhaustive as the JS/TS side's ~150 rules built up over many sessions. Worth extending incrementally as more Python repos surface gaps, same as the JS side was built.
+- Did not audit whether OTHER content-level rules in `codeIntelligence.js` have the same cross-language ambiguity as the Express one (e.g., could a Fastify or Koa heuristic false-positive on some other language's syntax?) — fixed the demonstrated case, didn't chase every theoretical instance.
+- Did not re-run a full end-to-end deep-analysis pipeline execution against a live Python GitHub repo this session (would require a real repo + GitHub API round trip) — verified at the detection-function level with realistic synthetic file content instead, which exercises the same code path.
+- Item 1 (GitHub-publish versioning ideas) not yet addressed — user explicitly asked for ideas, not immediate implementation; to be researched and presented next.
+
+**Next Actions:** User to re-run deep analysis on `cora-recap-engine` (or any Python repo) to confirm the corrected tech stack shows up in a real generated portfolio, not just the isolated test. Then continue to item 1 (GitHub-publish versioning ideas).
+
+---

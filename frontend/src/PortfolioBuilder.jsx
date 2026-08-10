@@ -907,6 +907,10 @@ function PortfolioBuilder({ onLogout, onGoToBrowse, onRepoDeleted, autoStart = f
 
   async function handlePublish() {
     if (!portfolio || publishing) return
+    if (!profile.fullName?.trim()) {
+      setPublishError('Add your name in the profile section before publishing.')
+      return
+    }
     setPublishing(true)
     setPublishError(null)
 
@@ -1397,29 +1401,37 @@ function PortfolioBuilder({ onLogout, onGoToBrowse, onRepoDeleted, autoStart = f
 
               {/* Text fields */}
               {[
-                { key: 'fullName',    label: 'Full Name',             placeholder: 'Jane Smith',                              type: 'text'  },
+                { key: 'fullName',    label: 'Full Name',             placeholder: 'Jane Smith',                              type: 'text',  required: true },
                 { key: 'headline',    label: 'Professional Headline', placeholder: 'AI & Full-Stack Developer',               type: 'text'  },
                 { key: 'location',   label: 'Location',              placeholder: 'Toronto, Canada',                         type: 'text'  },
                 { key: 'email',      label: 'Email',                 placeholder: 'jane@email.com',                          type: 'email' },
                 { key: 'githubUrl',  label: 'GitHub URL',            placeholder: 'https://github.com/username',             type: 'url'   },
                 { key: 'linkedinUrl',label: 'LinkedIn URL',           placeholder: 'https://linkedin.com/in/username',        type: 'url'   },
                 { key: 'website',    label: 'Personal Website',      placeholder: 'https://yoursite.com (optional)',          type: 'url'   },
-              ].map(({ key, label, placeholder, type }) => (
-                <div key={key} style={{ marginBottom: '10px' }}>
-                  <label style={{ display: 'block', fontSize: '11px', fontWeight: '700', color: '#374151', marginBottom: '4px' }}>{label}</label>
-                  <input
-                    type={type}
-                    value={profile[key] || ''}
-                    onChange={e => setProfile(p => ({ ...p, [key]: e.target.value }))}
-                    placeholder={placeholder}
-                    style={{
-                      width: '100%', padding: '9px 12px',
-                      border: '1px solid #e5e7eb', borderRadius: '8px',
-                      fontSize: '13px', color: '#111827', outline: 'none', boxSizing: 'border-box',
-                    }}
-                  />
-                </div>
-              ))}
+              ].map(({ key, label, placeholder, type, required }) => {
+                const isEmpty = required && !profile[key]?.trim()
+                return (
+                  <div key={key} style={{ marginBottom: '10px' }}>
+                    <label style={{ display: 'block', fontSize: '11px', fontWeight: '700', color: '#374151', marginBottom: '4px' }}>
+                      {label}{required && <span style={{ color: '#dc2626' }}> *</span>}
+                    </label>
+                    <input
+                      type={type}
+                      value={profile[key] || ''}
+                      onChange={e => setProfile(p => ({ ...p, [key]: e.target.value }))}
+                      placeholder={placeholder}
+                      style={{
+                        width: '100%', padding: '9px 12px',
+                        border: `1px solid ${isEmpty ? '#fca5a5' : '#e5e7eb'}`, borderRadius: '8px',
+                        fontSize: '13px', color: '#111827', outline: 'none', boxSizing: 'border-box',
+                      }}
+                    />
+                    {isEmpty && (
+                      <p style={{ margin: '4px 0 0', fontSize: '11px', color: '#dc2626' }}>Required before publishing.</p>
+                    )}
+                  </div>
+                )
+              })}
             </EditorSection>
 
             {/* 3. Headline */}

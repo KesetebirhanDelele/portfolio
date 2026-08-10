@@ -645,13 +645,29 @@ function ProjectCard({ repo, oneLiner, aiDescription }) {
 }
 
 // ─── Experience helpers ───────────────────────────────────────────────────────
+// Repo slugs (kebab-case, snake_case, PascalCase) shouldn't be shown as-is —
+// "cora-recap-engine" should read "Cora Recap Engine" on a resume, not the
+// raw GitHub name. Hyphens/underscores become spaces, case boundaries get
+// split, and each resulting word is Title Cased unless it looks like an
+// acronym or already has internal capitalization worth preserving (API,
+// GraphQL, RepoPulse's already-split "Pulse", etc).
 function formatRepoName(name = '') {
   return name
-    .replace(/_/g, ' ')
-    .replace(/([a-z])([A-Z])/g, '$1 $2')
+    .replace(/[_-]+/g, ' ')
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
     .replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2')
     .replace(/\s+/g, ' ')
     .trim()
+    .split(' ')
+    .map(word => {
+      if (!word) return word
+      const hasUpper = /[A-Z]/.test(word)
+      const hasLower = /[a-z]/.test(word)
+      if (hasUpper && !hasLower) return word          // ALLCAPS acronym — keep as-is
+      if (hasUpper && hasLower) return word            // already mixed-case (e.g. GraphQL) — keep as-is
+      return word.charAt(0).toUpperCase() + word.slice(1)
+    })
+    .join(' ')
 }
 
 function inferRoleTitle(repo) {
@@ -964,7 +980,15 @@ export default function PublicPortfolio({ slug }) {
 
           {/* ── Professional Summary ───────────────────────────────── */}
           <Section id="overview" icon="👤" title="Professional Summary">
-            <SummaryText text={narrative || 'No summary available.'} />
+            {/* Resume-sourced summary (if a resume was uploaded) takes priority —
+                shown first, in the person's own words, with the repo-derived
+                narrative following as supporting detail rather than replacing it. */}
+            {linkedin?.summary?.trim() && (
+              <p style={{ margin: '0 0 14px', fontSize: '13px', color: TS, lineHeight: 1.7 }}>
+                {linkedin.summary.trim()}
+              </p>
+            )}
+            <SummaryText text={narrative || (linkedin?.summary?.trim() ? '' : 'No summary available.')} />
 
             {/* Portfolio Highlights row */}
             <div className="pp-highlights" style={{

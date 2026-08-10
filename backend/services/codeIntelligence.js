@@ -14,30 +14,10 @@
 //   - Fully deterministic — same input always produces identical output
 // ─────────────────────────────────────────────────────────────────────────────
 
-// ── Confidence levels ─────────────────────────────────────────────────────────
-// Represent certainty of detection, ordered highest → lowest.
-// Config match is strongest evidence (explicit declaration in a config file).
-// Path-only is weakest (heuristic based on directory / filename alone).
+// ── Confidence levels + domain labels — shared with codeIntelligencePython.js,
+// see codeIntelligenceConstants.js ──────────────────────────────────────────
 
-const CONFIDENCE = {
-  CONFIG:  0.95,  // exact config filename / file extension match
-  IMPORT:  0.80,  // import or require() statement found in source
-  CONTENT: 0.70,  // usage pattern found in file body (not an import line)
-  PATH:    0.60,  // directory segment or filename heuristic only
-};
-
-// ── Domain labels ─────────────────────────────────────────────────────────────
-// Top-level architectural capability buckets.
-// A single file can belong to multiple domains.
-
-const DOMAINS = {
-  AUTHENTICATION: 'authentication',
-  API_LAYER:      'api_layer',
-  DATABASE:       'database',
-  AI_TOOLING:     'ai_tooling',
-  FRONTEND:       'frontend',
-  INFRASTRUCTURE: 'infrastructure',
-};
+const { CONFIDENCE, DOMAINS } = require('./codeIntelligenceConstants');
 
 // ── Content types that carry architecture signals ─────────────────────────────
 // 'style' (CSS) and 'unknown' are skipped — they rarely contain useful signals.
@@ -88,6 +68,19 @@ function pathHasDir(filePath, segments) {
   const parts = (typeof filePath === 'string' ? filePath : '').split('/');
   const dirs  = parts.slice(0, -1).map(s => s.toLowerCase());
   return segments.some(seg => dirs.includes(seg));
+}
+
+const JS_EXTENSIONS = new Set(['.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs']);
+
+/**
+ * True for JS/TS source files. Used to gate CONTENT-level heuristics whose
+ * pattern text is generic enough to appear in another language's syntax too
+ * — e.g. `app.get(` matches both Express route registration and a Python
+ * FastAPI decorator (`@app.get("/path")`), which was misidentifying Python
+ * backends as Express. See PROGRESS.md M63.
+ */
+function isJsFile(filePath) {
+  return JS_EXTENSIONS.has(getExtension(filePath));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -375,8 +368,11 @@ const RULES = [
     domain: DOMAINS.API_LAYER, technology: 'express', framework: 'express',
     architectureSignal: 'rest_api',
     confidence: CONFIDENCE.CONTENT, matchType: 'content',
-    // express() creates the app; Router() creates a sub-router; app.get/post/etc. add routes
-    test: f => /\bexpress\s*\(\)|Router\s*\(\)|app\.(get|post|put|delete|patch|use)\s*\(/i.test(f.content),
+    // express() creates the app; Router() creates a sub-router; app.get/post/etc.
+    // add routes — gated to JS/TS files since that last pattern also matches a
+    // Python FastAPI decorator (`@app.get("/path")`) on plain text alone.
+    test: f => isJsFile(f.path) &&
+               /\bexpress\s*\(\)|Router\s*\(\)|app\.(get|post|put|delete|patch|use)\s*\(/i.test(f.content),
   },
 
   // ── Fastify ───────────────────────────────────────────────────────────────
@@ -1145,7 +1141,7 @@ const RULES = [
     confidence: CONFIDENCE.CONTENT, matchType: 'content',
     test: f => /medallion|bronze[\s_-]?(layer|table)|silver[\s_-]?(layer|table)|gold[\s_-]?(layer|table)/i.test(f.content),
   },
-];
+].concat(require('./codeIntelligencePython').PYTHON_RULES);
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Technology → human-readable display label
@@ -1687,4 +1683,6 @@ module.exports = {
   extractSignalsFromFile,
   aggregateRepositorySignals,
   analyzeRepositoryIntelligence,
+  DOMAINS,
+  CONFIDENCE,
 };

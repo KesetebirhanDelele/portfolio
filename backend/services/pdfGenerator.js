@@ -61,6 +61,14 @@ const CI_ARCH_LABELS = {
   infrastructure_as_code:  'Infrastructure Automation',
   payment_processing:      'Payment Integration',
   rest_routing:            'REST API Routing',
+  asgi_server:             'ASGI Server Deployment',
+  wsgi_server:             'WSGI Server Deployment',
+  task_queue:              'Background Task Processing',
+  mvc_web_framework:       'MVC Web Framework',
+  schema_validation:       'Schema Validation',
+  automated_testing:       'Automated Testing',
+  cloud_integration:       'Cloud Service Integration',
+  connection_pooling:      'Database Connection Pooling',
 };
 
 // career_signals domain → professional job title noun
@@ -507,11 +515,16 @@ function buildResumeHtml({
   title, headline, narrative, topSkills = [], projects = [],
   careerSignals = [], repos = [], githubUsername,
   profile = {}, experience = [], education = [], certifications = [],
+  resumeSummary = null,
 }) {
   const patterns      = allPatterns(repos);
   const skillsByCategory = aggregateSkills(repos, topSkills, patterns);
   const projectBlocks = buildProjectBlocks(projects, repos);
-  const summary       = buildPersonSummary(repos, experience, careerSignals);
+  // A resume-sourced summary (uploaded LinkedIn PDF) takes priority when
+  // present — shown first, in the person's own words — with the repo-derived
+  // synthesis following as supporting detail rather than replacing it.
+  const repoSummary   = buildPersonSummary(repos, experience, careerSignals);
+  const summaryParagraphs = [resumeSummary?.trim(), repoSummary].filter(Boolean);
 
   const displayName     = profile.fullName || title || 'Developer Portfolio';
   const displayRoleLine = buildProfessionalHeadline(repos, careerSignals, experience, profile.headline || headline);
@@ -671,10 +684,10 @@ function buildResumeHtml({
     ${contactParts.length ? `<div class="contact">${contactParts.join('<span class="contact-sep">|</span>')}</div>` : ''}
   </div>
 
-  ${summary ? `
+  ${summaryParagraphs.length ? `
   <div class="section">
     <div class="section-title">Professional Summary</div>
-    <p class="summary">${esc(summary)}</p>
+    ${summaryParagraphs.map(p => `<p class="summary">${esc(p)}</p>`).join('')}
   </div>` : ''}
 
   ${experienceHtml ? `
@@ -724,8 +737,26 @@ function esc(str) {
     .replace(/'/g, '&#x27;');
 }
 
+// Kept in sync with formatRepoName in frontend/src/PublicPortfolio.jsx —
+// same reasoning: a raw kebab/snake/Pascal-case repo slug shouldn't appear
+// verbatim on a resume ("cora-recap-engine" → "Cora Recap Engine").
 function fmtName(name = '') {
-  return name.replace(/_/g, ' ').replace(/([a-z])([A-Z])/g, '$1 $2').replace(/\s+/g, ' ').trim();
+  return name
+    .replace(/[_-]+/g, ' ')
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .split(' ')
+    .map(word => {
+      if (!word) return word;
+      const hasUpper = /[A-Z]/.test(word);
+      const hasLower = /[a-z]/.test(word);
+      if (hasUpper && !hasLower) return word;
+      if (hasUpper && hasLower) return word;
+      return word.charAt(0).toUpperCase() + word.slice(1);
+    })
+    .join(' ');
 }
 
 function ensureHttps(url) {

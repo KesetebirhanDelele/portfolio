@@ -8,6 +8,8 @@ const TECH_CATEGORIES = {
   fastapi: 'Backend',     rails: 'Backend',        spring: 'Backend',
   jwt: 'Backend',         passport: 'Backend',     'next-auth': 'Backend',
   clerk: 'Backend',       'firebase-auth': 'Backend', 'rest-routes': 'Backend',
+  pydantic: 'Backend',    celery: 'Backend',       rq: 'Backend',
+  'django-rest-framework': 'Backend',
   // Frontend
   react: 'Frontend',      nextjs: 'Frontend',      vue: 'Frontend',
   angular: 'Frontend',    svelte: 'Frontend',      tailwind: 'Frontend',
@@ -20,6 +22,7 @@ const TECH_CATEGORIES = {
   prisma: 'ORM & Data Access',    drizzle: 'ORM & Data Access',
   mongoose: 'ORM & Data Access',  sequelize: 'ORM & Data Access',
   typeorm: 'ORM & Data Access',   knex: 'ORM & Data Access',
+  sqlalchemy: 'ORM & Data Access',
   // AI/ML
   openai: 'AI/ML',        anthropic: 'AI/ML',      langchain: 'AI/ML',
   llamaindex: 'AI/ML',    'vercel-ai-sdk': 'AI/ML', pinecone: 'AI/ML',
@@ -27,9 +30,10 @@ const TECH_CATEGORIES = {
   mistral: 'AI/ML',       cohere: 'AI/ML',         groq: 'AI/ML',
   // DevOps
   docker: 'DevOps',       kubernetes: 'DevOps',    'github-actions': 'DevOps',
-  terraform: 'DevOps',
+  terraform: 'DevOps',    uvicorn: 'DevOps',       gunicorn: 'DevOps',
+  pgbouncer: 'DevOps',
   // Integrations
-  stripe: 'Integrations',
+  stripe: 'Integrations', 'aws-sdk': 'Integrations',
   // Data & Analytics Platforms
   'microsoft-fabric':       'Data & Analytics',
   'power-bi':               'Data & Analytics',
@@ -60,6 +64,15 @@ const TECH_LABELS = {
   pyspark:                  'PySpark',
   dbt:                      'dbt',
   'medallion-architecture': 'Medallion Architecture',
+  sqlalchemy:               'SQLAlchemy',
+  celery:                   'Celery',
+  rq:                       'RQ',
+  pydantic:                 'Pydantic',
+  uvicorn:                  'Uvicorn',
+  gunicorn:                 'Gunicorn',
+  pgbouncer:                'PgBouncer',
+  'django-rest-framework':  'Django REST Framework',
+  'aws-sdk':                'AWS SDK',
 };
 
 module.exports = { TECH_CATEGORIES, TECH_LABELS };
