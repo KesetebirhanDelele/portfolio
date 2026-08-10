@@ -1354,3 +1354,39 @@ Committed M47/M47.1 (commit `3b197d9`), then ran the deferred "npm install + boo
 **Next Actions:** User to click "↻ Refresh" on the "portfolio" repo in the browser, then use the existing "Regenerate Descriptions" action and republish to confirm the real description actually reaches the live page.
 
 ---
+
+### M61 — Redesigned PDF project descriptions (goal + approach); found and fixed why tech stack/bullets never rendered; added certifications *(2026-08-10)*
+**Session:** CC-20260809-8f3k
+
+**User asked for ideas on the PDF's project-description format** (previous state: truncated single-line fragments like "Next." and "...weather data and.") **and to add certifications**, which — checked directly against both codebases — had never been implemented anywhere, not in current R2R nor in the original Portfolioforge (the one earlier grep match was `trustServerCertificate`, an unrelated SQL config flag).
+
+**Presented 3 concrete format options with real data-grounded previews; user chose "Goal + existing strengths sentence"** — reusing `analyses.summary_json.highlights.strengths` (already LLM-written, natural-sounding, and — critically — present for every repo including Colaberry ones, which have no deep-analysis tech data to build a deterministic "Built with X, Y, Z" sentence from).
+
+**Implemented in `pdfGenerator.js`:**
+- Replaced `cleanProjectDescription` (85-char hard truncation + naive first-`.`-is-a-sentence-boundary logic) with `cleanGoalSentence` (real sentence-boundary detection via `[^.!?]+[.!?]+`, first sentence only) + `buildProjectSummary` (appends the strengths sentence). Also fixes the "Next." bug: the old code found the period inside "Next.js" and treated it as end-of-sentence — added `protectDottedNames`/`restoreDottedNames` swapping known dotted framework names (Next.js, Node.js, Vue.js, etc.) for dot-free placeholders before sentence-splitting, restored after.
+- Threaded `strengths: r.summary_json?.highlights?.strengths` into the `repos` mapping in the PDF route (`routes/portfolios.js`).
+
+**While verifying against the real running backend, found a second, much larger bug the user then also flagged ("make sure tech stack appears for projects as well"):** `content_json.narrative.projects[]` had **no `repoName` field at all** for the live portfolio — confirmed by direct query. `buildProjectBlocks`'s `repos.find(r => r.name === p.repoName)` had therefore been silently failing for every project, meaning the deep-analysis-derived tech-stack list and capability bullets have likely never actually rendered in any PDF, for any portfolio — not something introduced this session. Root cause: `NARRATIVE_SYSTEM_PROMPT` (`openai.js`) instructs the model to echo `repoName` per project, but a "no repo names in headline or narrative" rule sitting a few lines above the schema in the same prompt appears to bleed over and suppress it. **Fixed at the source, deterministically rather than by re-prompting:** `generatePortfolioNarrative` now re-attaches `repoName` by array position after the LLM call — projects are given to the model in a fixed, guaranteed order, so trusting that order is more reliable than trusting the model to echo an identifier correctly.
+
+**Certifications, built from scratch (LinkedIn PDF import → storage → both render surfaces):**
+- `LINKEDIN_EXTRACT_PROMPT` (`openai.js`): added a `certifications` array (`name`, `issuer`, `issueDate`, `credentialUrl`) to the extraction schema.
+- Storage required zero changes — `routes/portfolios.js`'s `/linkedin-pdf` route already stores the full `extracted` object wholesale into `content_json.linkedin`, so the new field flows through automatically.
+- `pdfGenerator.js`: added `certifications` param, `certificationsHtml` builder, CSS, and a "Certifications" section (mirrors the existing Education section's structure) after Education, threaded through from `routes/portfolios.js`'s PDF route (`certifications: linkedin.certifications || []`).
+- `PublicPortfolio.jsx`: added a Certifications sub-block to the live page's Experience section (mirrors Education's timeline styling, amber dot instead of green, links to `credentialUrl` when present) — inherits the same pre-existing constraint Education already has (only renders when `linkedin.experience` is also non-empty), not a new limitation introduced here.
+
+**Validation (live, against the real running backend, real GitHub-connected repos, and the real published portfolio — not mocked):**
+- Verified the description-cleaning logic in isolation first against all 7 real stored one-liners (Pedal Power, cora-recap-engine, RepoPulse, portfolio, etc.) — caught and fixed a redundancy bug of my own (taking 2 sentences from `overview` before appending `strengths` produced 3-sentence descriptions) before it shipped.
+- Generated a real PDF via `GET /api/portfolios/public/my-portfolio-9b7hez/pdf`, extracted its actual text with `pdfjs-dist`: confirmed clean 2-sentence descriptions with no truncation artifacts and no "Next." bug.
+- Regenerated the narrative via the real `/generate-narrative` route, confirmed `repoName` now populated for all 7 projects, regenerated the PDF again: **tech stack and capability bullets now render** — "portfolio" shows `Tech Stack: JWT, Express, REST API Design, PostgreSQL, OpenAI API, Docker`, "cora-recap-engine" shows `Express, REST API Design, Docker, Next.js, React`, "lead_conversion" shows `Express` — all previously silently empty.
+- Injected realistic test certifications directly into the live portfolio's `content_json`, confirmed they appear correctly in both the public JSON API response and the actual rendered PDF text (`CERTIFICATIONS` section with name/issuer/date), then removed the fabricated test data afterward so it wouldn't sit in the user's real portfolio.
+- `npm run build` (80 modules, succeeds); `npx eslint src/PublicPortfolio.jsx` — 3 pre-existing issues (lines 54/98/98), confirmed via `git diff --unified=0` to fall entirely outside the changed range (1079-1115). Backend files syntax-checked (`node -c`) individually.
+
+**Risks / Limitations:**
+- Existing already-generated portfolios (any created before this fix) still have `repoName`-less `narrative.projects` in storage — the fix only applies going forward. Each existing portfolio needs its narrative regenerated once (via the existing "Regenerate Descriptions"/`generate-narrative` action) to pick up tech stack + bullets + the strengths sentence.
+- The positional `repoName` re-attachment assumes the model preserves project order and count, which held in the real test but isn't formally guaranteed by the API — if the model ever drops or reorders a project, the fix could misattribute. Low risk in practice (LLMs reliably preserve list-transform order), not worth a more complex correction for a `gpt-4o-mini` JSON-mode call.
+- Certifications extraction itself (LinkedIn PDF → AI parsing) hasn't been tested with a real LinkedIn PDF upload this session — validated the storage/render path with injected test data, not the extraction prompt's real-world accuracy.
+- Not click-tested in an actual browser — verified via direct HTTP calls, real PDF generation, and real PDF text extraction, which exercises the same code the frontend calls but doesn't confirm visual layout.
+
+**Next Actions:** User to (1) re-upload their LinkedIn PDF to test real certification extraction, (2) regenerate the narrative for any existing portfolio to pick up the tech-stack/bullets fix, (3) confirm the live public page and downloaded PDF both look right.
+
+---

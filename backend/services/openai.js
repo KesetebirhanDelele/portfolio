@@ -252,7 +252,25 @@ async function generatePortfolioNarrative(analyses) {
   });
 
   const raw = response.choices[0].message.content;
-  return JSON.parse(raw);
+  const result = JSON.parse(raw);
+
+  // The model is instructed to echo repoName per project (see the schema
+  // example above and projectContext in buildNarrativeUserPrompt) but
+  // doesn't reliably do so — likely bleed-over from the "no repo names in
+  // headline or narrative" rule a few lines above it in the same prompt.
+  // Downstream rendering (PDF tech stack, bullets, the strengths sentence)
+  // depends on repoName to match a project back to its real repo data, so
+  // re-attach it deterministically by position rather than trusting the
+  // model's free-form field — projects are given to it in this exact order.
+  // See PROGRESS.md M61.
+  if (Array.isArray(result.projects)) {
+    result.projects = result.projects.map((p, i) => ({
+      ...p,
+      repoName: analyses[i]?.repoName || p.repoName || null,
+    }));
+  }
+
+  return result;
 }
 
 const README_SYSTEM_PROMPT = `You are a senior technical writer producing a professional README.md that provides genuine recruiter value.
@@ -372,6 +390,14 @@ Return ONLY valid JSON with this exact structure:
       "degree": "Degree and field of study",
       "startYear": "Year or null",
       "endYear": "Year or null"
+    }
+  ],
+  "certifications": [
+    {
+      "name": "Certification or license name",
+      "issuer": "Issuing organization",
+      "issueDate": "Month Year or Year or null",
+      "credentialUrl": "Credential URL if present or null"
     }
   ],
   "skills": ["skill1", "skill2"]

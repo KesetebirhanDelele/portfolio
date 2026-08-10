@@ -339,25 +339,59 @@ function buildArchBullets(archPatterns, techs, frameworks) {
 
 // ─── Project description line ─────────────────────────────────────────────────
 
-function cleanProjectDescription(overview, hookSentence) {
+// Dotted tech names whose internal "." would otherwise be mistaken for a
+// sentence boundary by the "first sentence" split below (e.g. "A Next.js +
+// Express-powered..." was getting chopped down to just "Next."). Swapped for
+// a dot-free placeholder before splitting, restored after. See PROGRESS.md M61.
+const DOTTED_TECH_NAMES = [
+  'Next.js', 'Node.js', 'Nuxt.js', 'Vue.js', 'Nest.js',
+  'D3.js', 'Three.js', 'Express.js', 'React.js', 'Ember.js', 'Backbone.js',
+];
+function protectDottedNames(s) {
+  return DOTTED_TECH_NAMES.reduce((out, name) => out.split(name).join(name.replace('.', '')), s);
+}
+function restoreDottedNames(s) {
+  return DOTTED_TECH_NAMES.reduce((out, name) => out.split(name.replace('.', '')).join(name), s);
+}
+
+// Sentence 1: what the project does, straight from the AI-generated overview
+// or hook sentence — kept to its first 1-2 real sentences rather than an
+// arbitrary character count (the old 85-char hard cutoff chopped mid-word,
+// e.g. "...weather data and." where the sentence actually continued).
+function cleanGoalSentence(overview, hookSentence) {
   const raw = overview || hookSentence;
   if (!raw) return null;
-  let s = raw
+  let s = protectDottedNames(raw)
     .replace(/^This\s+(repository|repo|project)\s+(is\s+|implements?\s+)?/i, '')
     .replace(/^[Aa]n?\s+[\w\s,+\-\/]+?-powered\s+/i, '')
     .replace(/^[Aa]n?\s+/, '')
     .replace(/\s+spanning\s+\d+\s+architectural\s+layers?[^.]*\.?/gi, '.')
     .replace(/\s+across\s+\d+\s+(interconnected\s+)?components?[^.]*\.?/gi, '.')
+    .replace(/\s{2,}/g, ' ')
     .trim();
   if (!s) return null;
-  // Use only the first sentence
-  const firstPeriod = s.indexOf('.');
-  if (firstPeriod > 0 && firstPeriod < s.length - 1) s = s.slice(0, firstPeriod + 1);
-  // Truncate at 85 characters on a word boundary
-  if (s.length > 85) s = s.slice(0, 83).replace(/\s+\S*$/, '') + '.';
+  // First sentence only — a second sentence from `strengths` is appended by
+  // buildProjectSummary below, so two sentences from `overview` here would
+  // make the combined description run to 3+ sentences of goal alone.
+  const sentences = s.match(/[^.!?]+[.!?]+/g);
+  if (sentences) s = sentences[0].trim();
+  s = restoreDottedNames(s);
   s = s.charAt(0).toUpperCase() + s.slice(1);
-  if (!s.endsWith('.')) s += '.';
+  if (!/[.!?]$/.test(s)) s += '.';
   return s;
+}
+
+// Sentence 2 (optional): how it was built / the approach taken, reusing the
+// basic analysis's own "strengths" sentence (analyses.summary_json.highlights
+// .strengths) — already natural-language and, unlike deep-analysis tech
+// signals, present for every repo including Colaberry (non-code) projects.
+function buildProjectSummary(overview, hookSentence, strengths) {
+  const goal = cleanGoalSentence(overview, hookSentence);
+  const howMade = strengths?.trim() || null;
+  if (goal && howMade) return `${goal} ${/[.!?]$/.test(howMade) ? howMade : howMade + '.'}`;
+  if (goal) return goal;
+  if (howMade) return howMade.charAt(0).toUpperCase() + howMade.slice(1) + (/[.!?]$/.test(howMade) ? '' : '.');
+  return null;
 }
 
 // ─── Project blocks ───────────────────────────────────────────────────────────
@@ -368,10 +402,11 @@ function buildProjectBlocks(projects, repos) {
     const ci    = repo.codeIntelligence || {};
     const intel = repo.intelligence     || {};
 
-    // One-line description of what the project is
-    const desc = cleanProjectDescription(
+    // 2-3 sentence summary: what it does + how it was made
+    const desc = buildProjectSummary(
       intel.executiveSummary?.overview,
       intel.portfolioNarrative?.hookSentence || p.oneLiner,
+      repo.analysis?.strengths,
     );
 
     // Priority 1: technicalDifferentiation — what's technically interesting (human-sounding)
@@ -471,7 +506,7 @@ function aggregateSkills(repos, topSkills, patterns) {
 function buildResumeHtml({
   title, headline, narrative, topSkills = [], projects = [],
   careerSignals = [], repos = [], githubUsername,
-  profile = {}, experience = [], education = [],
+  profile = {}, experience = [], education = [], certifications = [],
 }) {
   const patterns      = allPatterns(repos);
   const skillsByCategory = aggregateSkills(repos, topSkills, patterns);
@@ -531,6 +566,12 @@ function buildResumeHtml({
       <div class="edu-institution">${esc(e.institution)}${years ? ` &middot; ${esc(years)}` : ''}</div>
     </div>`;
   }).join('');
+
+  const certificationsHtml = (certifications || []).map(c => `
+    <div class="cert-entry">
+      <div class="cert-name">${esc(c.name)}</div>
+      <div class="cert-issuer">${[c.issuer, c.issueDate].filter(Boolean).map(esc).join(' &middot; ')}</div>
+    </div>`).join('');
 
   const projectsHtml = projectBlocks.map(p => `
     <div class="project">
@@ -600,6 +641,11 @@ function buildResumeHtml({
   .edu-degree      { font-size: 10pt; font-weight: 600; color: #000; }
   .edu-institution { font-size: 9.5pt; color: #333; margin-top: 2px; }
 
+  /* ── Certifications ── */
+  .cert-entry      { margin-bottom: 7px; }
+  .cert-name       { font-size: 10pt; font-weight: 600; color: #000; }
+  .cert-issuer     { font-size: 9.5pt; color: #333; margin-top: 2px; }
+
   /* ── Projects ── */
   .project         { margin-bottom: 14px; }
   .project-name    { font-size: 10.5pt; font-weight: 700; color: #000; }
@@ -649,6 +695,12 @@ function buildResumeHtml({
   <div class="section">
     <div class="section-title">Education</div>
     ${educationHtml}
+  </div>` : ''}
+
+  ${certificationsHtml ? `
+  <div class="section">
+    <div class="section-title">Certifications</div>
+    ${certificationsHtml}
   </div>` : ''}
 
   <div class="footer">

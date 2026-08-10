@@ -1076,6 +1076,43 @@ export default function PublicPortfolio({ slug }) {
                   </div>
                 )}
 
+                {/* Certifications from LinkedIn */}
+                {linkedin.certifications?.length > 0 && (
+                  <div style={{ marginTop: '28px' }}>
+                    <h3 style={{ margin: '0 0 14px', fontSize: '11px', fontWeight: '800', color: T, textTransform: 'uppercase', letterSpacing: '1.5px' }}>Certifications</h3>
+                    <div style={{ position: 'relative' }}>
+                      <div style={{ position: 'absolute', left: '111px', top: 0, bottom: 0, width: '2px', backgroundColor: BD }} />
+                      {linkedin.certifications.map((cert, i) => (
+                        <div key={i} style={{ display: 'flex', marginBottom: '20px', alignItems: 'flex-start' }}>
+                          {/* Date */}
+                          <div style={{ width: '88px', flexShrink: 0, textAlign: 'right', paddingRight: '12px', paddingTop: '3px' }}>
+                            {cert.issueDate && (
+                              <span style={{ fontSize: '11px', color: TM, fontWeight: '500', whiteSpace: 'nowrap' }}>
+                                {cert.issueDate}
+                              </span>
+                            )}
+                          </div>
+                          {/* Dot */}
+                          <div style={{ width: '22px', flexShrink: 0, display: 'flex', justifyContent: 'center', paddingTop: '3px', zIndex: 1, position: 'relative' }}>
+                            <div style={{ width: '12px', height: '12px', borderRadius: '50%', backgroundColor: '#f59e0b', border: '3px solid #fff', boxShadow: '0 0 0 2px #f59e0b' }} />
+                          </div>
+                          {/* Content */}
+                          <div style={{ flex: 1, paddingLeft: '14px' }}>
+                            {cert.credentialUrl ? (
+                              <a href={ensureHttps(cert.credentialUrl)} target="_blank" rel="noreferrer" style={{ margin: '0 0 3px', fontSize: '14px', fontWeight: '700', color: T, textDecoration: 'none', display: 'block' }}>
+                                {cert.name}
+                              </a>
+                            ) : (
+                              <h4 style={{ margin: '0 0 3px', fontSize: '14px', fontWeight: '700', color: T }}>{cert.name}</h4>
+                            )}
+                            <p style={{ margin: 0, fontSize: '13px', color: '#b45309', fontWeight: '600' }}>{cert.issuer}</p>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
               </div>
             ) : null}
           </Section>

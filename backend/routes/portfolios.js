@@ -347,6 +347,7 @@ router.get('/public/:slug/pdf', async (req, res) => {
       analysis: r.skills_json ? {
         technologies: r.skills_json,
         whatItDoes:   r.summary_json?.what_it_does,
+        strengths:    r.summary_json?.highlights?.strengths,
       } : null,
       intelligence:     r.intelligence_json    || null,
       inference:        r.inference_json       || null,
@@ -365,6 +366,7 @@ router.get('/public/:slug/pdf', async (req, res) => {
       profile,
       experience:     linkedin.experience  || [],
       education:      linkedin.education   || [],
+      certifications: linkedin.certifications || [],
     });
 
     res.setHeader('Content-Type', 'application/pdf');
