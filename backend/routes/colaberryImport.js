@@ -9,10 +9,31 @@ const { queueAnalysis } = require('../services/analysisQueue');
 
 const router = express.Router();
 
+// Matches Portfolioforge's original MAX_LINKS constant.
+const MAX_MANUAL_LINKS = 10;
+// Only Colaberry's own domain — this endpoint points our server's
+// authenticated Playwright session at whatever URL it's given, so without
+// this it's an SSRF-shaped hole (arbitrary URL + a live authenticated
+// session attached). Colaberry's own access control (what the user's
+// session can actually see) is still the real permission boundary; this
+// just stops the URL itself from pointing somewhere unrelated entirely.
+const ALLOWED_LINK_PREFIX = 'https://app.colaberry.com/';
+
 // Stable id derived from the project URL so re-running import upserts
 // instead of duplicating (idempotency, per CLAUDE.md's non-negotiable rule).
 function externalIdForProject(sourceUrl) {
   return crypto.createHash('sha256').update(sourceUrl).digest('hex').slice(0, 40);
+}
+
+function validateManualLinks(links) {
+  if (!Array.isArray(links) || links.length === 0) return 'projectLinks must be a non-empty array of URLs.';
+  if (links.length > MAX_MANUAL_LINKS) return `You can import up to ${MAX_MANUAL_LINKS} project links at a time.`;
+  for (const link of links) {
+    if (typeof link !== 'string' || !link.startsWith(ALLOWED_LINK_PREFIX)) {
+      return `Each link must be a Colaberry project URL starting with ${ALLOWED_LINK_PREFIX}`;
+    }
+  }
+  return null;
 }
 
 function buildReadmeContent(project) {
@@ -20,21 +41,30 @@ function buildReadmeContent(project) {
   return [project.stepByStepContent, ...stepSections].join('\n\n').slice(0, 100000);
 }
 
-// POST /api/colaberry-import — pull the logged-in user's Colaberry projects
-// (via SQL + the captured live-login session) and import them alongside
-// their GitHub repos, provider='colaberry'. Never touches deep_analyses —
+// POST /api/colaberry-import — import Colaberry projects alongside the
+// user's GitHub repos, provider='colaberry'. Never touches deep_analyses —
 // these aren't source code, so they go through the basic analysis pipeline
 // (analyses table) instead. See PROGRESS.md M47.3 / M51 for why.
+//
+// Body (optional): { projectLinks: string[] } — explicit Colaberry project
+// URLs to import, matching Portfolioforge's original primary flow (paste
+// 1-10 project links directly — not restricted to projects the SQL lookup
+// would consider "yours"; whatever the user's own live-login session can
+// actually view is the real boundary, same as Colaberry's own access
+// control). When omitted, falls back to auto-discovering the logged-in
+// user's own projects via SQL (the M51 behavior). See PROGRESS.md M55.
 router.post('/', authMiddleware, async (req, res) => {
   const { id: userId } = req.user;
+  const { projectLinks: manualLinks } = req.body || {};
+
+  if (manualLinks !== undefined) {
+    const validationError = validateManualLinks(manualLinks);
+    if (validationError) {
+      return res.status(400).json({ success: false, error: { code: 'VALIDATION_ERROR', message: validationError } });
+    }
+  }
 
   try {
-    const userRow = await pool.query('SELECT email FROM users WHERE id = $1', [userId]);
-    const email = userRow.rows[0]?.email;
-    if (!email) {
-      return res.status(400).json({ success: false, error: { code: 'NO_EMAIL', message: 'Your account has no email on file.' } });
-    }
-
     const sessionRow = await pool.query(
       'SELECT encrypted_storage_state, encryption_iv FROM colaberry_sessions WHERE user_id = $1',
       [userId]
@@ -52,17 +82,26 @@ router.post('/', authMiddleware, async (req, res) => {
     }
     const storageState = sessionManager.decryptStorageState(sessionRow.rows[0], encKey);
 
-    const colaberryUser = await getColaberryUserByEmail(email);
-    if (!colaberryUser) {
-      return res.status(404).json({
-        success: false,
-        error: { code: 'NOT_FOUND', message: 'No Colaberry account found for your email.' },
-      });
-    }
-
-    const projectLinks = await getProjectLinksForUser(colaberryUser.UserID);
-    if (projectLinks.length === 0) {
-      return res.status(200).json({ success: true, data: { imported: [], failed: [] } });
+    let projectLinks;
+    if (Array.isArray(manualLinks) && manualLinks.length > 0) {
+      projectLinks = manualLinks.map(l => l.trim());
+    } else {
+      const userRow = await pool.query('SELECT email FROM users WHERE id = $1', [userId]);
+      const email = userRow.rows[0]?.email;
+      if (!email) {
+        return res.status(400).json({ success: false, error: { code: 'NO_EMAIL', message: 'Your account has no email on file.' } });
+      }
+      const colaberryUser = await getColaberryUserByEmail(email);
+      if (!colaberryUser) {
+        return res.status(404).json({
+          success: false,
+          error: { code: 'NOT_FOUND', message: 'No Colaberry account found for your email.' },
+        });
+      }
+      projectLinks = await getProjectLinksForUser(colaberryUser.UserID);
+      if (projectLinks.length === 0) {
+        return res.status(200).json({ success: true, data: { imported: [], failed: [] } });
+      }
     }
 
     const { succeeded, failed: scrapeFailed } = await scrapeColaberryProjects(storageState, projectLinks);

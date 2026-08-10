@@ -1213,3 +1213,22 @@ Committed M47/M47.1 (commit `3b197d9`), then ran the deferred "npm install + boo
 - The general "basic-analysis-only repos are mishandled by deep-analysis-oriented UI" class of bug is now fixed for the specific paths touched (`loadRepos`, auto-trigger) but wasn't audited across the entire frontend for other places that might assume every repo has gone through `deep_analyses`.
 
 **Next Actions:** User to retry the full Colaberry connect → import flow fresh against the fixed code (longer timeout, correct status display) to confirm the UI now correctly shows it as analyzed rather than failed.
+
+---
+
+### M55 — Restored Portfolioforge's original manual-link import flow *(2026-08-10)*
+**Session:** CC-20260809-8f3k
+
+**Gap identified by user:** `colaberryImport.js` (M51) only ever auto-discovered "the logged-in user's own projects" via SQL. Portfolioforge's original design (Kalkidan's `src/index.js`) actually treated **manually pasted project links as the primary flow** — the CLI asked for "1-3 Colaberry project links" upfront; SQL auto-lookup was only a fallback when no links were typed (`if ((!formData.projectLinks || formData.projectLinks.length === 0) && formData.userId)`). That meant a student could import *any* Colaberry project link they could view — their own, a classmate's, anything from Colaberry's shared "network" browsing area — not just projects the SQL lookup would attribute to their own account. M51's port dropped that capability entirely.
+
+**Restored, with one addition the original didn't need:** `POST /api/colaberry-import` now accepts an optional `projectLinks` array in the body. When provided, those links are scraped directly, bypassing the SQL/email lookup entirely (up to 10 at a time, matching Portfolioforge's original `MAX_LINKS`). When omitted, falls back to the M51 auto-discovery behavior unchanged.
+
+**The addition:** validated every manual link against `https://app.colaberry.com/` before touching Playwright. Without this, the endpoint would let any authenticated user point our server's live authenticated Colaberry session at *any* URL — an SSRF-shaped hole (arbitrary destination + a real authenticated session attached), not present in the original single-user CLI tool where the operator was trusted by construction. The actual view-permission boundary is still Colaberry's own access control on what the user's captured session can see — this check only stops the URL itself from pointing somewhere unrelated to Colaberry at all.
+
+**Frontend:** new pre-step modal in `Header.jsx`, shown before the live-login modal opens — a textarea for pasting links (client-side validated the same way as the backend, for fast feedback) with a "Skip — import my own" option that preserves the original M51 one-click flow. Collected links get passed through to the `/api/colaberry-import` call once live-login completes.
+
+**Validation:** `node -c` on the updated route; full backend reboot against live Postgres, clean; `npm run build` (80 modules) and `npx eslint` on `Header.jsx`, confirmed via `git diff --unified=0` that all reported lint issues fall outside the changed line ranges (pre-existing).
+
+**Risks / Limitations:** Not yet exercised live with a real non-own-account Colaberry project link (would need the user to test with an actual link from Colaberry's network view). The domain check is a simple prefix match — sufficient for the stated threat (arbitrary destination), not a full URL-parsing/allowlist system, which felt proportionate to the actual risk here.
+
+**Next Actions:** User to test importing a specific pasted Colaberry project link (not their own) to confirm the restored flow works end-to-end.

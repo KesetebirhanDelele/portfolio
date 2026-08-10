@@ -89,6 +89,10 @@ function Header({ onLogout }) {
   const [autoImportError, setAutoImportError]         = useState(null)
   const [showColaberryLogin, setShowColaberryLogin]   = useState(false)
   const [colaberryBanner, setColaberryBanner]         = useState(null)
+  const [showColaberryLinksPrompt, setShowColaberryLinksPrompt] = useState(false)
+  const [colaberryLinksInput, setColaberryLinksInput] = useState('')
+  const [colaberryLinksError, setColaberryLinksError] = useState('')
+  const [colaberryLinksToImport, setColaberryLinksToImport] = useState([])
   const [cameFromAutoImport, setCameFromAutoImport]   = useState(false)
   const [publicImporting, setPublicImporting]         = useState(null)  // username being auto-imported
   const [privateImporting, setPrivateImporting]       = useState(null)  // username being auto-imported (private)
@@ -791,7 +795,7 @@ function Header({ onLogout }) {
 
                   {/* Connect Colaberry account — embedded live browser, see PROGRESS.md M48/M49 */}
                   <button
-                    onClick={() => setShowColaberryLogin(true)}
+                    onClick={() => { setColaberryLinksInput(''); setColaberryLinksError(''); setShowColaberryLinksPrompt(true) }}
                     className="flex items-center gap-2.5 px-3 py-2.5 rounded-xl border border-dashed border-emerald-200 bg-emerald-50/50 hover:bg-emerald-50 hover:border-emerald-300 transition text-left"
                   >
                     <div className="w-8 h-8 rounded-full bg-emerald-100 flex items-center justify-center flex-shrink-0">
@@ -815,13 +819,91 @@ function Header({ onLogout }) {
               </div>
             )}
 
+            {showColaberryLinksPrompt && (
+              <div className="fixed inset-0 bg-gray-900/60 flex items-center justify-center z-50 p-4">
+                <div className="bg-white rounded-2xl shadow-xl w-full max-w-lg overflow-hidden">
+                  <div className="px-6 py-4 border-b border-gray-100">
+                    <h3 className="text-lg font-bold text-gray-900">Which Colaberry projects?</h3>
+                    <p className="text-sm text-gray-500 mt-1">
+                      Paste specific project links to import — not limited to projects tied to your own
+                      account, any Colaberry project link you can view works. One per line, up to 10.
+                      Leave blank to auto-import your own projects instead.
+                    </p>
+                  </div>
+                  <div className="px-6 py-4">
+                    <textarea
+                      value={colaberryLinksInput}
+                      onChange={e => setColaberryLinksInput(e.target.value)}
+                      placeholder="https://app.colaberry.com/app/network/network/...&#10;https://app.colaberry.com/app/network/network/..."
+                      rows={5}
+                      className="w-full text-sm border border-gray-200 rounded-xl px-3 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-200"
+                    />
+                    {colaberryLinksError && (
+                      <p className="text-xs text-red-500 mt-2">{colaberryLinksError}</p>
+                    )}
+                  </div>
+                  <div className="px-6 py-4 border-t border-gray-100 flex items-center justify-between">
+                    <button
+                      onClick={() => setShowColaberryLinksPrompt(false)}
+                      className="px-4 py-2 rounded-xl text-sm font-semibold text-gray-600 hover:bg-gray-50 transition"
+                    >
+                      Cancel
+                    </button>
+                    <div className="flex gap-3">
+                      <button
+                        onClick={() => {
+                          setColaberryLinksToImport([])
+                          setShowColaberryLinksPrompt(false)
+                          setShowColaberryLogin(true)
+                        }}
+                        className="px-4 py-2 rounded-xl text-sm font-semibold text-indigo-600 hover:bg-indigo-50 transition"
+                      >
+                        Skip — import my own
+                      </button>
+                      <button
+                        onClick={() => {
+                          const links = colaberryLinksInput.split('\n').map(l => l.trim()).filter(Boolean)
+                          if (links.length === 0) {
+                            setColaberryLinksToImport([])
+                            setShowColaberryLinksPrompt(false)
+                            setShowColaberryLogin(true)
+                            return
+                          }
+                          if (links.length > 10) {
+                            setColaberryLinksError('You can import up to 10 project links at a time.')
+                            return
+                          }
+                          const bad = links.find(l => !l.startsWith('https://app.colaberry.com/'))
+                          if (bad) {
+                            setColaberryLinksError(`Each link must start with https://app.colaberry.com/ — check: ${bad}`)
+                            return
+                          }
+                          setColaberryLinksError('')
+                          setColaberryLinksToImport(links)
+                          setShowColaberryLinksPrompt(false)
+                          setShowColaberryLogin(true)
+                        }}
+                        className="px-5 py-2 rounded-xl text-sm font-semibold text-white bg-indigo-600 hover:bg-indigo-700 transition"
+                      >
+                        Continue
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+
             {showColaberryLogin && (
               <ColaberryLiveLogin
                 onComplete={async () => {
                   setShowColaberryLogin(false)
                   setColaberryBanner('Colaberry account connected — importing your projects…')
                   try {
-                    const res = await authFetch(`${BASE_URL}/api/colaberry-import`, { method: 'POST' })
+                    const res = await authFetch(`${BASE_URL}/api/colaberry-import`, {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify(colaberryLinksToImport.length > 0 ? { projectLinks: colaberryLinksToImport } : {}),
+                    })
                     const body = res ? await res.json() : null
                     if (!body?.success && body?.data?.imported?.length === 0 && body?.data?.failed?.length === 0) {
                       setColaberryBanner('Connected — no Colaberry projects found for your account.')
