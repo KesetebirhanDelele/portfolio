@@ -109,6 +109,30 @@ router.post('/', authMiddleware, async (req, res) => {
 
     const { succeeded, failed: scrapeFailed } = await scrapeColaberryProjects(storageState, projectLinks);
 
+    // extractProjectImage() (colaberryProjectScraper.js) reads the image from
+    // a specific DOM element on the project page and can come back empty
+    // depending on page layout — confirmed live (M64.5: 2 of 3 real projects
+    // had no DOM image). Colaberry's own catalog (ADF_Proj_Deployed.ProjectVisual,
+    // exposed via getNetworkProjects) is a second, independent image source for
+    // the same "network" projects — fall back to it so a page-layout quirk
+    // doesn't leave a project with no image at all.
+    if (succeeded.some(p => !p.imageUrl)) {
+      try {
+        const catalog = await getNetworkProjects('All');
+        const catalogById = new Map(catalog.map(p => [p.networkId, p.imageUrl]));
+        for (const project of succeeded) {
+          if (project.imageUrl) continue;
+          const match = project.sourceUrl.match(/\/network\/network\/(\d+)\//);
+          const networkId = match ? Number(match[1]) : null;
+          if (networkId != null && catalogById.get(networkId)) {
+            project.imageUrl = catalogById.get(networkId);
+          }
+        }
+      } catch (err) {
+        console.error('[colaberry-import] catalog image fallback failed:', err.message);
+      }
+    }
+
     const imported = [];
     const importFailed = [...scrapeFailed.map(f => ({ url: f.url, error: f.error }))];
 
@@ -117,14 +141,15 @@ router.post('/', authMiddleware, async (req, res) => {
         const result = await pool.query(
           `INSERT INTO repositories (
              user_id, provider, external_repo_id, name, full_name, description,
-             private, topics, readme_content, imported_at, sync_status, created_at, updated_at
-           ) VALUES ($1, 'colaberry', $2, $3, $3, $4, false, $5, $6, NOW(), 'synced', NOW(), NOW())
+             private, topics, readme_content, image_url, imported_at, sync_status, created_at, updated_at
+           ) VALUES ($1, 'colaberry', $2, $3, $3, $4, false, $5, $6, $7, NOW(), 'synced', NOW(), NOW())
            ON CONFLICT (provider, external_repo_id) DO UPDATE SET
              name             = EXCLUDED.name,
              full_name        = EXCLUDED.full_name,
              description      = EXCLUDED.description,
              topics           = EXCLUDED.topics,
              readme_content   = EXCLUDED.readme_content,
+             image_url        = EXCLUDED.image_url,
              imported_at      = NOW(),
              sync_status      = 'synced',
              updated_at       = NOW()
@@ -136,6 +161,7 @@ router.post('/', authMiddleware, async (req, res) => {
             project.description,
             JSON.stringify(project.tags),
             buildReadmeContent(project),
+            project.imageUrl || null,
           ]
         );
 

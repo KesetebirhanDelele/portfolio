@@ -8,10 +8,24 @@
 // tagged with GENERATED_PORTFOLIO_TOPIC (must match routes/repos.js's
 // constant) so it can never be re-imported as if it were a source project —
 // that round-trip is exactly the bug this session found and fixed (M47.3/M48).
+//
+// Versioning model (M64): fixed full-sync. Each publish makes the repo match
+// the current portfolio exactly — project folders are keyed by a stable slug
+// derived from repoName (not array position), so reordering/removing a
+// project can never make an old folder path point at different content.
+// Folders for projects no longer in the portfolio are deleted (no orphans).
+// Real version history comes from git itself (every publish is a commit with
+// a message describing what changed) rather than a bespoke versioning layer.
+//
+// Visual layout (M64.2): ported from legacy/portfolioforge-automation's
+// README generation (shields.io skill badges, two-column project cards with
+// an image + summary) — the original plain bullet-list output looked nothing
+// like Kalkidan's version and read as a raw data dump, not a portfolio.
 const axios = require('axios');
 
 const GITHUB_API = 'https://api.github.com';
 const GENERATED_PORTFOLIO_TOPIC = 'repo2reputation-generated';
+const BADGE_COLORS = ['F2C811', '025E8C', '3776AB', '217346', 'FF7A00', '00A6A6', '6A5ACD', 'D83B01', '4361EE', 'EA4335'];
 
 function headers(token) {
   return {
@@ -60,56 +74,277 @@ async function upsertFile(token, owner, repoName, path, content, message) {
   );
 }
 
-function buildPortfolioReadme(narrative, profile) {
-  const skillsList = (narrative.top_skills || []).map(s => `\`${s.name}\``).join(' · ') || '_None yet_';
-  const projectLinks = (narrative.projects || [])
-    .map((p, i) => `- [${p.repoName}](./project-${i + 1}/README.md)`)
-    .join('\n') || '_No projects yet_';
+async function deleteFile(token, owner, repoName, path, message) {
+  const { data } = await axios.get(`${GITHUB_API}/repos/${owner}/${repoName}/contents/${path}`, { headers: headers(token) });
+  await axios.delete(`${GITHUB_API}/repos/${owner}/${repoName}/contents/${path}`, {
+    headers: headers(token),
+    data: { message, sha: data.sha },
+  });
+}
 
-  return `# ${profile?.name || 'Portfolio'}
+// Lists top-level `project-*` directories currently in the repo, so a publish
+// can tell which ones are stale (no longer part of the current portfolio).
+async function listRootProjectFolders(token, owner, repoName) {
+  try {
+    const { data } = await axios.get(`${GITHUB_API}/repos/${owner}/${repoName}/contents/`, { headers: headers(token) });
+    return (Array.isArray(data) ? data : [])
+      .filter(entry => entry.type === 'dir' && entry.name.startsWith('project-'))
+      .map(entry => entry.name);
+  } catch (err) {
+    if (err.response?.status === 404) return [];
+    throw err;
+  }
+}
+
+function slugify(value) {
+  const slug = String(value || '')
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+  return slug || 'project';
+}
+
+// Assigns each project a stable folder name derived from its repoName rather
+// than its position in the array, so removing/reordering projects can't make
+// an existing folder path silently point at different content. Collisions
+// (two repos slugifying to the same string) get a numeric suffix.
+function assignProjectFolders(projects) {
+  const used = new Set();
+  return projects.map(project => {
+    const base = slugify(project.repoName);
+    let slug = base;
+    let n = 2;
+    while (used.has(slug)) slug = `${base}-${n++}`;
+    used.add(slug);
+    return { project, folder: `project-${slug}` };
+  });
+}
+
+// repoName values are sometimes a raw slug ("cora-recap-engine") and
+// sometimes already a human phrase ("Pedal Power: Predicting..."). Only
+// reformat the slug-like case; leave phrases with spaces untouched.
+function humanizeName(raw) {
+  if (!raw) return raw;
+  if (/\s/.test(raw)) return raw;
+  const words = raw
+    .replace(/[_-]+/g, ' ')
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .split(' ')
+    .filter(Boolean);
+  return words
+    .map(w => (w === w.toUpperCase() && w.length > 1 ? w : w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()))
+    .join(' ');
+}
+
+function buildSkillBadges(topSkills) {
+  return (topSkills || [])
+    .slice(0, 12)
+    .map((s, i) => `<img src="https://img.shields.io/badge/${encodeURIComponent(s.name)}-${BADGE_COLORS[i % BADGE_COLORS.length]}?style=for-the-badge&logoColor=white" alt="${s.name}">`)
+    .join(' ');
+}
+
+function buildContactBadges(profile) {
+  return [
+    profile?.linkedinUrl ? `<a href="${profile.linkedinUrl}"><img src="https://img.shields.io/badge/LinkedIn-0077B5?style=for-the-badge&logo=linkedin&logoColor=white"></a>` : null,
+    profile?.githubUrl   ? `<a href="${profile.githubUrl}"><img src="https://img.shields.io/badge/GitHub-181717?style=for-the-badge&logo=github&logoColor=white"></a>` : null,
+    profile?.email       ? `<a href="mailto:${profile.email}"><img src="https://img.shields.io/badge/Email-EA4335?style=for-the-badge&logo=gmail&logoColor=white"></a>` : null,
+    profile?.website     ? `<a href="${profile.website}"><img src="https://img.shields.io/badge/Website-4361EE?style=for-the-badge&logo=googlechrome&logoColor=white"></a>` : null,
+  ].filter(Boolean).join(' ');
+}
+
+// Two-column card (image + summary) used in the main README's Projects
+// section — falls back to a single text column when no image is on file
+// (R2R relies on a manually-pasted media URL per repo, not an auto-screenshot
+// like the legacy tool had, so not every project will have one).
+function buildProjectCard(project, folder, imageUrl) {
+  const title = humanizeName(project.repoName);
+  const summary = project.description || project.oneLiner || '';
+  const imageCell = imageUrl
+    ? `<td width="45%" align="center" valign="middle">\n\n<img src="${imageUrl}" width="100%" height="220">\n\n</td>\n\n`
+    : '';
+  const textWidth = imageUrl ? '55%' : '100%';
+
+  return `
+<table>
+<tr>
+${imageCell}<td width="${textWidth}" valign="top">
+
+### ${title}
+
+${summary}
+
+<p align="right">
+  <a href="./${folder}/README.md"><b>View Full Project →</b></a>
+</p>
+
+</td>
+</tr>
+</table>
+`;
+}
+
+function buildPortfolioReadme(narrative, profile, assigned, resumeSummary, projectImages = {}) {
+  const badges = buildSkillBadges(narrative.top_skills);
+  // Resume-sourced summary (the person's own words) leads; the AI-synthesized
+  // repo narrative follows as supporting detail — same priority as the PDF
+  // and public portfolio page (M63).
+  const about = [resumeSummary?.trim(), narrative.narrative].filter(Boolean).join('\n\n');
+  const projectCards = assigned
+    .map(({ project, folder }) => buildProjectCard(project, folder, projectImages[project.repoName]))
+    .join('\n');
+  const contactBadges = buildContactBadges(profile);
+
+  return `# ${profile?.fullName || 'Portfolio'}
 ${narrative.headline ? `\n**${narrative.headline}**\n` : ''}
-## About
-
-${narrative.narrative || ''}
-
 ## Skills & Tools
 
-${skillsList}
+${badges || '_None yet_'}
+
+---
+
+## About
+
+${about || '_No summary yet_'}
+
+---
 
 ## Projects
 
-${projectLinks}
+${projectCards || '_No projects yet_'}
+${contactBadges ? `
+---
 
+## Contact
+
+${contactBadges}
+` : ''}
 ---
 _Generated by Repo2Reputation._
 `;
 }
 
-function buildProjectReadme(project) {
-  return `# ${project.repoName}
+// caseStudy: { businessProblem, objectives[], tools[], workflow[], keyInsights[], businessImpact[] }
+// or null/undefined when generation wasn't available — falls back to the
+// original minimal page (title + image + summary) in that case.
+function buildProjectReadme(project, imageUrl, caseStudy) {
+  const title = humanizeName(project.repoName);
+  const summary = project.description || project.oneLiner || '';
 
-${project.description || project.oneLiner || ''}
+  if (!caseStudy) {
+    return `# ${title}
+${imageUrl ? `\n![${title}](${imageUrl})\n` : ''}
+${summary}
+
+---
+[← Back to portfolio](../README.md)
+`;
+  }
+
+  const bullets = items => (items || []).map(item => `- ${item}`).join('\n');
+
+  return `# ${title}
+
+## Project Overview
+
+${summary || caseStudy.businessProblem}
+
+---
+
+## Business Problem
+
+${caseStudy.businessProblem}
+
+---
+
+## Objective
+
+${bullets(caseStudy.objectives)}
+
+---
+
+## Tools & Technologies
+
+${bullets(caseStudy.tools)}
+
+---
+
+## Project Workflow
+
+${bullets(caseStudy.workflow)}
+
+---
+
+## Key Insights
+
+${bullets(caseStudy.keyInsights)}
+
+---
+
+## Final Dashboard / Project Preview
+
+${imageUrl ? `![Final Dashboard](${imageUrl})` : 'No project preview image available.'}
+
+---
+
+## Business Impact
+
+${bullets(caseStudy.businessImpact)}
+
+---
+
+[← Back to portfolio](../README.md)
 `;
 }
 
 // narrative: portfolio.content_json.narrative (headline, narrative, top_skills, projects[])
 // profile:   portfolio.content_json.profile
-async function publishPortfolioAsGithubRepo({ token, owner, repoName, narrative, profile }) {
+// resumeSummary: the user's own uploaded resume summary, shown before the
+//   AI-synthesized narrative when present (M63/M64.2)
+// projectImages: { [repoName]: imageUrl } — from repo_media, same source the
+//   public portfolio page uses (M64.2)
+// caseStudies: { [repoName]: caseStudy } — AI-generated Business Problem /
+//   Objective / Workflow / Key Insights / Business Impact per project (M65).
+//   Missing entries just render the original minimal project page.
+async function publishPortfolioAsGithubRepo({ token, owner, repoName, narrative, profile, resumeSummary = null, projectImages = {}, caseStudies = {} }) {
   const { repo, created } = await ensureRepoExists(token, owner, repoName);
   await setGeneratedTopic(token, owner, repoName, repo.topics || []);
 
-  await upsertFile(token, owner, repoName, 'README.md', buildPortfolioReadme(narrative, profile), 'Update portfolio README');
-
   const projects = narrative.projects || [];
-  for (let i = 0; i < projects.length; i++) {
-    await upsertFile(
-      token, owner, repoName, `project-${i + 1}/README.md`,
-      buildProjectReadme(projects[i]),
-      `Update project-${i + 1} README`
+  const assigned = assignProjectFolders(projects);
+  const desiredFolders = new Set(assigned.map(a => a.folder));
+
+  const existingFolders = await listRootProjectFolders(token, owner, repoName);
+  const staleFolders = existingFolders.filter(f => !desiredFolders.has(f));
+
+  for (const folder of staleFolders) {
+    await deleteFile(
+      token, owner, repoName, `${folder}/README.md`,
+      `Remove project no longer in portfolio: ${folder.replace(/^project-/, '')}`
     );
   }
 
-  return { repoUrl: repo.html_url || `https://github.com/${owner}/${repoName}`, created };
+  await upsertFile(
+    token, owner, repoName, 'README.md',
+    buildPortfolioReadme(narrative, profile, assigned, resumeSummary, projectImages),
+    `Sync portfolio README (${projects.length} project${projects.length === 1 ? '' : 's'})`
+  );
+
+  for (const { project, folder } of assigned) {
+    const isNew = !existingFolders.includes(folder);
+    await upsertFile(
+      token, owner, repoName, `${folder}/README.md`,
+      buildProjectReadme(project, projectImages[project.repoName], caseStudies[project.repoName]),
+      `${isNew ? 'Add' : 'Update'} project: ${project.repoName || folder}`
+    );
+  }
+
+  return {
+    repoUrl: repo.html_url || `https://github.com/${owner}/${repoName}`,
+    created,
+    projectsSynced: assigned.length,
+    projectsRemoved: staleFolders.length,
+  };
 }
 
 module.exports = { publishPortfolioAsGithubRepo, GENERATED_PORTFOLIO_TOPIC };

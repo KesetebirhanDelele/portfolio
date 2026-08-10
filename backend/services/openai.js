@@ -120,7 +120,8 @@ My technical work spans backend engineering with Node.js and Python, frontend de
 I approach software development by focusing on clean architecture, thoughtful system design, and practical problem-solving. I am comfortable working across the full stack — from database schema to frontend UI — and I take ownership of the entire software lifecycle from design through deployment. I am looking to contribute to teams building ambitious products where engineering quality and product impact matter."
 
 === PROJECT ONE-LINERS ===
-- Use the provided "Project Hook" sentence directly — do NOT write generic descriptions
+- For each project, write ONE sentence (max ~25 words) describing its USE CASE — the real-world problem it solves or who it's for — grounded in the provided "useCase" reference text, in your own words.
+- Do NOT copy the reference text verbatim, and do NOT write a tech-stack recap (e.g. avoid "An X-powered application spanning N layers"). A recruiter reading it should understand what the project DOES, not what it's built with.
 
 === SKILLS AND SIGNALS ===
 - top_skills: deduplicate across repos, rank by confidence descending, max 10
@@ -138,7 +139,7 @@ Return ONLY valid JSON with this exact structure:
     { "name": "React", "category": "Frontend", "confidence": 0.94 }
   ],
   "projects": [
-    { "repoName": "my-app", "oneLiner": "Use the Project Hook sentence from input when available." }
+    { "repoName": "my-app", "oneLiner": "One sentence on what this project does and who it's for — not a tech-stack recap." }
   ],
   "engineering_strengths": ["AI Integration", "Backend API Development", "System Architecture"],
   "career_signals": [
@@ -226,11 +227,19 @@ Operational Capabilities:
 ${bulletList(capList.slice(0, 10))}`;
 
   // ── Per-project data — repo names present here for the "projects" array ONLY ─
+  // whatItDoes (from the basic analysis pipeline's own LLM call, which reads
+  // the actual repo) comes first — it's genuine purpose-aware text.
+  // hookSentence is a deterministic template ("A Next.js-powered
+  // application spanning N architectural layers...") built from structural
+  // counts, not prose about what the project does; it's a last-resort
+  // fallback only. Getting this backwards was why "oneLiner" values read as
+  // generic tech-stack recitations regardless of how accurate detection
+  // was — confirmed live. See PROGRESS.md M64.7.
   const projectRows = analyses.map((a, i) => {
-    const hook = a.intelligence?.portfolioNarrative?.hookSentence
-              || a.whatItDoes
+    const hook = a.whatItDoes
+              || a.intelligence?.portfolioNarrative?.hookSentence
               || 'No description available';
-    return `  Project ${i + 1}: repoName="${a.repoName}" | oneLiner="${hook}"`;
+    return `  Project ${i + 1}: repoName="${a.repoName}" | useCase="${hook}"`;
   }).join('\n');
 
   const projectContext = `=== PROJECT LIST (populate the "projects" array ONLY — do NOT use repoName values in headline or narrative) ===
@@ -248,7 +257,7 @@ async function generatePortfolioNarrative(analyses) {
       { role: 'user',   content: buildNarrativeUserPrompt(analyses) },
     ],
     temperature: 0.5,
-    max_tokens: 2000,
+    max_tokens: 3000,
   });
 
   const raw = response.choices[0].message.content;
@@ -263,10 +272,20 @@ async function generatePortfolioNarrative(analyses) {
   // re-attach it deterministically by position rather than trusting the
   // model's free-form field — projects are given to it in this exact order.
   // See PROGRESS.md M61.
-  if (Array.isArray(result.projects)) {
+  if (Array.isArray(result.projects) && result.projects.length > 0) {
     result.projects = result.projects.map((p, i) => ({
       ...p,
       repoName: analyses[i]?.repoName || p.repoName || null,
+    }));
+  } else if (analyses.length > 0) {
+    // The model occasionally returns otherwise-valid JSON that just omits
+    // the "projects" key entirely (not a parse failure — confirmed live,
+    // M64.2) — never ship a narrative with zero projects when repos WERE
+    // analyzed; fall back to a deterministic array built from the same data
+    // given to the prompt.
+    result.projects = analyses.map(a => ({
+      repoName: a.repoName,
+      oneLiner: a.whatItDoes || a.intelligence?.portfolioNarrative?.hookSentence || 'No description available',
     }));
   }
 
@@ -419,17 +438,18 @@ async function extractLinkedInProfile(rawText) {
   return JSON.parse(response.choices[0].message.content);
 }
 
-const PROJECT_DESCRIPTION_SYSTEM_PROMPT = `You are a technical writer creating a professional project description for a developer portfolio.
+const PROJECT_DESCRIPTION_SYSTEM_PROMPT = `You are a technical writer creating a professional project description for a developer portfolio. The primary reader is a recruiter or hiring manager — not an engineer doing a code review — so it has to make sense to someone skimming quickly, not just someone fluent in the tech stack.
 
-Based on the structured signals provided, write exactly 2–4 prose paragraphs:
-- Paragraph 1: What the project does and its primary business value
-- Paragraph 2: Engineering architecture — key technical decisions, patterns, complexity
-- Paragraph 3: Key accomplishments, standout capabilities, or measurable impact
-- Paragraph 4 (only if there is meaningful additional context): Technology stack or deployment highlights
+Based on the structured signals provided, write exactly 2–3 prose paragraphs:
+- Paragraph 1: The use case — what real-world problem this solves and who it's for. Lead with this, in plain language. A reader should understand what the project DOES before any technology is named.
+- Paragraph 2: How the implementation makes it effective — the specific design decisions that matter, and why they matter (e.g. a queue exists to handle concurrent load, a cache exists to cut response time, an integration exists to keep data in sync). Not an inventory of every technology used.
+- Paragraph 3 (only if there is a genuine, evidenced accomplishment or measurable impact in the input — omit otherwise): concrete outcomes or standout capabilities.
 
 Rules:
 - Write in third person ("This system..." / "The platform..." / "The application...")
-- Name actual technologies, patterns, and capabilities from the input — do not invent details
+- Lead with the use case, not the tech stack
+- Name a technology only when it supports a point about the design — not as a checklist. Keep jargon light; prefer plain descriptions of what something accomplishes over naming every pattern.
+- Avoid architecture-report phrasing ("N architectural layers", "M interconnected components", "spans across") — this is a portfolio, not an audit
 - Each paragraph: 2–4 sentences
 - No bullet points, no section headings — prose only
 - Do not open the first sentence with the project name
@@ -442,9 +462,12 @@ async function generateProjectDescription({
   operationalCapabilities, technologies, technicalDifferentiation,
   impactStatements, patternsInferred,
 }) {
+  // whatItDoes (genuine LLM read of the actual repo) leads; hookSentence
+  // (deterministic tech-stack/layer-count template) is only a fallback when
+  // no real analysis exists yet. Reversed before — see PROGRESS.md M64.7.
   const input = [
     `Project: ${repoName}`,
-    (hookSentence || whatItDoes) ? `What it does: ${hookSentence || whatItDoes}` : null,
+    (whatItDoes || hookSentence) ? `What it does: ${whatItDoes || hookSentence}` : null,
     probableDomain             ? `Business domain: ${probableDomain}` : null,
     operationalCapabilities?.length ? `Capabilities: ${operationalCapabilities.slice(0, 5).join('; ')}` : null,
     technologies?.length       ? `Technologies: ${technologies.slice(0, 12).join(', ')}` : null,
@@ -467,4 +490,122 @@ async function generateProjectDescription({
   return typeof raw.description === 'string' ? raw.description : '';
 }
 
-module.exports = { analyzeRepository, generatePortfolioNarrative, generateReadme, extractLinkedInProfile, generateProjectDescription };
+// Case-study generation (M65, versioned M65.1) — the per-project GitHub
+// README section structure (Business Problem / Objective / Tools / Workflow /
+// Key Insights / Business Impact) ported from legacy/portfolioforge-
+// automation's AI path (generateAIProjectContent), NOT its hardcoded
+// per-category fallback template engine — that fallback is exactly the kind
+// of generic templating M64.7 eliminated elsewhere, so there is no non-AI
+// fallback here. If generation fails, the caller simply omits the
+// case-study sections.
+//
+// CASE_STUDY_PROMPT_VERSION is stamped onto every generated case study and
+// checked by the caller before reusing repositories.case_study_json. Bump
+// this whenever the prompts/output shape below change — every cached row
+// then reads as stale on its next publish and regenerates automatically,
+// instead of silently sitting on out-of-date content until someone notices
+// and runs a manual backfill (the recurring problem M64.3/M64.5's one-off
+// backfill scripts existed to paper over for image_url/resume data).
+const CASE_STUDY_PROMPT_VERSION = 1;
+//
+// Colaberry-sourced projects (provider === 'colaberry') have real
+// step-by-step project material in readme_content and get a business-case
+// framing, matching Kalkidan's tool. GitHub repos don't have that material,
+// so they get an engineering-project framing grounded in the same
+// whatItDoes/code-intelligence signals generateProjectDescription() uses —
+// with an explicit instruction not to invent business impact when the repo
+// has none evidenced.
+const CASE_STUDY_COLABERRY_SYSTEM_PROMPT = `You are writing a project case-study page for a data analytics portfolio, for a recruiter or hiring manager reading quickly — not a technical reviewer. Base everything ONLY on the provided project material (title, description, and step-by-step project instructions). Do not invent tools, metrics, or outcomes that aren't supported by that material.
+
+Return ONLY valid JSON with this exact shape:
+{
+  "businessProblem": "2-3 sentences: the real-world business problem this project addresses, in plain language.",
+  "objectives": ["3 concise objective bullets"],
+  "tools": ["5-8 tools/technologies actually used, from the material"],
+  "workflow": ["4-6 concise steps describing how the project was actually carried out"],
+  "keyInsights": ["3-4 specific insights or findings — pull real numbers/specifics from the material when present, don't generalize them away"],
+  "businessImpact": ["3 concise bullets on the business value this delivers"]
+}
+
+Rules:
+- Ground every field in the actual project material — no generic filler like "identified meaningful patterns"
+- Recruiter-friendly language, minimal jargon
+- If the material doesn't support a strong claim, keep the bullet modest rather than inventing one`;
+
+const CASE_STUDY_ENGINEERING_SYSTEM_PROMPT = `You are writing a project case-study page for a software engineering portfolio, for a recruiter or hiring manager reading quickly — not a code reviewer. Base everything ONLY on the provided project signals. Do not invent metrics, users, or outcomes that aren't supported by them.
+
+Return ONLY valid JSON with this exact shape:
+{
+  "businessProblem": "2-3 sentences: the real problem this application solves and who it's for, in plain language — not a tech-stack recap.",
+  "objectives": ["3 concise bullets on what the project set out to do"],
+  "tools": ["5-8 core technologies actually used"],
+  "workflow": ["4-6 concise steps describing how the system works or was built — plain language, not a code walkthrough"],
+  "keyInsights": ["3-4 specific, evidenced technical or design highlights — why a particular decision matters, not a features list"],
+  "businessImpact": ["2-3 bullets on the value delivered; if the input has no genuine evidenced impact, describe the capability/skill demonstrated instead of inventing outcomes"]
+}
+
+Rules:
+- Ground every field in the provided signals — no invented metrics or unsupported claims
+- Recruiter-friendly language, minimal jargon — avoid "N architectural layers" style phrasing
+- Lead the business problem with the use case, not the technology`;
+
+async function generateProjectCaseStudy({
+  repoName, isColaberrySourced, readmeContent,
+  whatItDoes, hookSentence, technologies, operationalCapabilities,
+  impactStatements, probableDomain,
+}) {
+  let systemPrompt, input;
+
+  if (isColaberrySourced) {
+    systemPrompt = CASE_STUDY_COLABERRY_SYSTEM_PROMPT;
+    input = [
+      `Project: ${repoName}`,
+      readmeContent ? `Project material:\n${readmeContent.slice(0, 8000)}` : null,
+    ].filter(Boolean).join('\n\n');
+  } else {
+    systemPrompt = CASE_STUDY_ENGINEERING_SYSTEM_PROMPT;
+    input = [
+      `Project: ${repoName}`,
+      (whatItDoes || hookSentence) ? `What it does: ${whatItDoes || hookSentence}` : null,
+      probableDomain ? `Business domain: ${probableDomain}` : null,
+      operationalCapabilities?.length ? `Capabilities: ${operationalCapabilities.slice(0, 5).join('; ')}` : null,
+      technologies?.length ? `Technologies: ${technologies.slice(0, 12).join(', ')}` : null,
+      impactStatements?.length ? `Impact: ${impactStatements.slice(0, 4).join('; ')}` : null,
+      readmeContent ? `README excerpt:\n${readmeContent.slice(0, 4000)}` : null,
+    ].filter(Boolean).join('\n');
+  }
+
+  if (!input.trim()) return null;
+
+  const response = await openai.chat.completions.create({
+    model: 'gpt-4o-mini',
+    response_format: { type: 'json_object' },
+    messages: [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: input },
+    ],
+    temperature: 0.3,
+    max_tokens: 900,
+  });
+
+  const raw = JSON.parse(response.choices[0].message.content);
+  const toArray = v => Array.isArray(v) ? v.filter(x => typeof x === 'string' && x.trim()) : [];
+
+  const caseStudy = {
+    version: CASE_STUDY_PROMPT_VERSION,
+    businessProblem: typeof raw.businessProblem === 'string' ? raw.businessProblem.trim() : '',
+    objectives: toArray(raw.objectives),
+    tools: toArray(raw.tools),
+    workflow: toArray(raw.workflow),
+    keyInsights: toArray(raw.keyInsights),
+    businessImpact: toArray(raw.businessImpact),
+  };
+
+  // Incomplete AI output is treated as failure — the caller omits the
+  // case-study sections rather than rendering a half-empty page.
+  if (!caseStudy.businessProblem || caseStudy.objectives.length === 0) return null;
+
+  return caseStudy;
+}
+
+module.exports = { analyzeRepository, generatePortfolioNarrative, generateReadme, extractLinkedInProfile, generateProjectDescription, generateProjectCaseStudy, CASE_STUDY_PROMPT_VERSION };

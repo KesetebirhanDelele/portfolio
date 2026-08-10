@@ -362,10 +362,13 @@ function restoreDottedNames(s) {
   return DOTTED_TECH_NAMES.reduce((out, name) => out.split(name.replace('.', '')).join(name), s);
 }
 
-// Sentence 1: what the project does, straight from the AI-generated overview
-// or hook sentence — kept to its first 1-2 real sentences rather than an
-// arbitrary character count (the old 85-char hard cutoff chopped mid-word,
-// e.g. "...weather data and." where the sentence actually continued).
+// Sentence 1: what the project does. Kept to its first 1-2 real sentences
+// rather than an arbitrary character count (the old 85-char hard cutoff
+// chopped mid-word, e.g. "...weather data and." where the sentence actually
+// continued). The regex cleanup below targets known deterministic-template
+// phrasing ("X-powered", "spanning N architectural layers") — harmless
+// no-ops against genuine free-form prose, which is what `overview` should
+// be whenever it's available (see buildProjectBlocks).
 function cleanGoalSentence(overview, hookSentence) {
   const raw = overview || hookSentence;
   if (!raw) return null;
@@ -410,9 +413,18 @@ function buildProjectBlocks(projects, repos) {
     const ci    = repo.codeIntelligence || {};
     const intel = repo.intelligence     || {};
 
-    // 2-3 sentence summary: what it does + how it was made
+    // 2-3 sentence summary: what it does + how it was made.
+    // Prefers analyses.summary_json (repo.analysis.summary/whatItDoes) — a
+    // genuine LLM call that reads the actual repo and describes its purpose
+    // — over intel.executiveSummary?.overview, which despite its name and
+    // being wrapped in an "agent" function is deterministic string-templating
+    // over structural signals (tech stack + layer count), not free-form
+    // prose. Confirmed by reading intelligenceAgents.js's
+    // runExecutiveSummaryAgent directly: no LLM call, ever. That's why
+    // descriptions read as generic tech-stack recitations regardless of how
+    // accurate the underlying detection is. See PROGRESS.md M64.6.
     const desc = buildProjectSummary(
-      intel.executiveSummary?.overview,
+      repo.analysis?.summary || repo.analysis?.whatItDoes || intel.executiveSummary?.overview,
       intel.portfolioNarrative?.hookSentence || p.oneLiner,
       repo.analysis?.strengths,
     );
@@ -442,10 +454,14 @@ function buildProjectBlocks(projects, repos) {
       }
     }
 
-    // Tech stack: deduplicate, limit to 6, display labels
-    const techKeys = [...new Set([...(ci.technologies || []), ...(ci.frameworks || [])])];
+    // Tech stack: frameworks first (more specific/informative than generic
+    // technology tags — "FastAPI" says more than "rest-routes"), then
+    // remaining technologies, deduplicated. Capped at 8, not 6 — 6 was
+    // cutting off central technologies (e.g. Python, PostgreSQL) on any
+    // stack with more than a couple of frameworks. See PROGRESS.md M64.7.
+    const techKeys = [...new Set([...(ci.frameworks || []), ...(ci.technologies || [])])];
     const techs = techKeys
-      .slice(0, 6)
+      .slice(0, 8)
       .map(t => TECH_LABELS[t] || t.charAt(0).toUpperCase() + t.slice(1));
 
     return { name: p.repoName, desc, bullets: finalBullets.slice(0, 4), techs };

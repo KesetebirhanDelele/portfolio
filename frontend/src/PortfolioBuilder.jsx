@@ -457,6 +457,8 @@ function PortfolioBuilder({ onLogout, onGoToBrowse, onRepoDeleted, autoStart = f
   const [linkedinUploading, setLinkedinUploading] = useState(false)
   const [linkedinData,      setLinkedinData]      = useState(null)
   const [linkedinError,     setLinkedinError]     = useState(null)
+  const [resumeDataDeleting, setResumeDataDeleting] = useState(false)
+  const [resumeDataError,    setResumeDataError]    = useState(null)
 
   // Step 3 — project descriptions
   const [generatingDescs, setGeneratingDescs] = useState(false)
@@ -469,6 +471,14 @@ function PortfolioBuilder({ onLogout, onGoToBrowse, onRepoDeleted, autoStart = f
   const [publicUrl, setPublicUrl]   = useState(null)
   const [publishError, setPublishError] = useState(null)
   const [copied, setCopied]         = useState(false)
+
+  // Push to GitHub (M64) — separate from Publish Portfolio above; pushes the
+  // current narrative to the user's own GitHub account as a repo of markdown.
+  const [githubPushOpen, setGithubPushOpen]     = useState(false)
+  const [githubRepoName, setGithubRepoName]     = useState('')
+  const [githubPushing, setGithubPushing]       = useState(false)
+  const [githubPushResult, setGithubPushResult] = useState(null)
+  const [githubPushError, setGithubPushError]   = useState(null)
 
   // Auto-start: tracks whether we've already kicked off auto-generation
   const autoStartedRef = useRef(false)
@@ -838,7 +848,7 @@ function PortfolioBuilder({ onLogout, onGoToBrowse, onRepoDeleted, autoStart = f
           setProfile(prev => ({ ...prev, ...pJson.data.profile }))
         }
         if (pJson.data.linkedin) {
-          setLinkedinData(pJson.data.linkedin)
+          applyLinkedinData(pJson.data.linkedin)
         }
       } else if (status === 'failed') {
         clearInterval(pollRef.current)
@@ -905,6 +915,30 @@ function PortfolioBuilder({ onLogout, onGoToBrowse, onRepoDeleted, autoStart = f
     await handleGenerateNarrative()
   }
 
+  // Persists the current editor state (profile, narrative, projects, skills)
+  // so publishing always reflects what's on screen — including profile
+  // fields that were auto-filled from reused resume data but never
+  // explicitly saved (M64.4: a revisiting user shouldn't have to click
+  // "Save Changes" separately before publishing/pushing works). Used by both
+  // handlePublish and handleGithubPush so neither can publish stale data.
+  function saveProfileAndNarrative() {
+    return authFetch(
+      `${BASE_URL}/api/portfolios/${portfolio.portfolioId}`,
+      {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          headline:   editedHeadline,
+          narrative:  editedNarrative,
+          projects:   editedProjects,
+          profile,
+          top_skills: mergedSkills,
+        }),
+      },
+      onLogout
+    )
+  }
+
   async function handlePublish() {
     if (!portfolio || publishing) return
     if (!profile.fullName?.trim()) {
@@ -916,21 +950,7 @@ function PortfolioBuilder({ onLogout, onGoToBrowse, onRepoDeleted, autoStart = f
 
     // Save profile + narrative before publishing so all fields appear in the public link
     try {
-      await authFetch(
-        `${BASE_URL}/api/portfolios/${portfolio.portfolioId}`,
-        {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            headline:   editedHeadline,
-            narrative:  editedNarrative,
-            projects:   editedProjects,
-            profile,
-            top_skills: mergedSkills,
-          }),
-        },
-        onLogout
-      )
+      await saveProfileAndNarrative()
     } catch {
       setPublishing(false)
       setPublishError('Failed to save profile before publishing. Please try again.')
@@ -952,6 +972,59 @@ function PortfolioBuilder({ onLogout, onGoToBrowse, onRepoDeleted, autoStart = f
       setPublicUrl(json.data.publicUrl)
     } else {
       setPublishError(json.error?.message || 'Failed to publish portfolio.')
+    }
+  }
+
+  function toggleGithubPush() {
+    if (!githubPushOpen) {
+      const base = (profile.fullName || 'my').toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '')
+      setGithubRepoName(`${base || 'my'}-portfolio`)
+      setGithubPushResult(null)
+      setGithubPushError(null)
+    }
+    setGithubPushOpen(open => !open)
+  }
+
+  async function handleGithubPush() {
+    if (!portfolio || githubPushing || !githubRepoName.trim()) return
+    if (!profile.fullName?.trim()) {
+      setGithubPushError('Add your name in the profile section before publishing.')
+      return
+    }
+    setGithubPushing(true)
+    setGithubPushError(null)
+    setGithubPushResult(null)
+
+    // Save current editor state first — same as Publish Portfolio — so a
+    // name/profile field that's only auto-filled client-side (e.g. from
+    // reused resume data) is actually there when the backend checks it.
+    try {
+      await saveProfileAndNarrative()
+    } catch {
+      setGithubPushing(false)
+      setGithubPushError('Failed to save profile before pushing. Please try again.')
+      return
+    }
+
+    const res = await authFetch(
+      `${BASE_URL}/api/portfolios/${portfolio.portfolioId}/publish-github-repo`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ repoName: githubRepoName.trim() }),
+      },
+      onLogout
+    )
+
+    if (!res) { setGithubPushing(false); return }
+
+    const json = await res.json()
+    setGithubPushing(false)
+
+    if (json.success) {
+      setGithubPushResult(json.data)
+    } else {
+      setGithubPushError(json.error?.message || 'Failed to push portfolio to GitHub.')
     }
   }
 
@@ -991,6 +1064,24 @@ function PortfolioBuilder({ onLogout, onGoToBrowse, onRepoDeleted, autoStart = f
     e.target.value = ''
   }
 
+  // Applies loaded/uploaded resume data to both linkedinData and the profile
+  // fields (only filling ones that are still empty) — shared by fresh
+  // uploads AND by loading already-stored resume data (reused across
+  // portfolios, M64.2), so "Full Name" etc. get pre-filled either way
+  // instead of only right after a fresh PDF upload.
+  function applyLinkedinData(data) {
+    if (!data) return
+    setLinkedinData(data)
+    setProfile(p => ({
+      ...p,
+      fullName:    p.fullName    || data.name        || '',
+      headline:    p.headline    || data.headline    || '',
+      location:    p.location    || data.location    || '',
+      email:       p.email       || data.email        || '',
+      linkedinUrl: p.linkedinUrl || data.linkedinUrl  || '',
+    }))
+  }
+
   async function handleLinkedinUpload(e) {
     const file = e.target.files?.[0]
     if (!file) return
@@ -1020,18 +1111,28 @@ function PortfolioBuilder({ onLogout, onGoToBrowse, onRepoDeleted, autoStart = f
     if (!res) return
     const json = await res.json()
     if (json.success) {
-      setLinkedinData(json.data)
-      // Auto-fill all extractable profile fields (only if currently empty)
-      setProfile(p => ({
-        ...p,
-        fullName:    p.fullName    || json.data.name      || '',
-        headline:    p.headline    || json.data.headline  || '',
-        location:    p.location    || json.data.location  || '',
-        email:       p.email       || json.data.email     || '',
-        linkedinUrl: p.linkedinUrl || json.data.linkedinUrl || '',
-      }))
+      applyLinkedinData(json.data)
+      setResumeDataError(null)
     } else {
       setLinkedinError(json.error?.message || 'Failed to process PDF.')
+    }
+  }
+
+  async function handleRemoveResumeData() {
+    if (resumeDataDeleting) return
+    if (!window.confirm('Permanently delete your stored resume data? This removes it from every portfolio, not just this one.')) return
+    setResumeDataDeleting(true)
+    setResumeDataError(null)
+
+    const res = await authFetch(`${BASE_URL}/api/portfolios/resume-data`, { method: 'DELETE' }, onLogout)
+    setResumeDataDeleting(false)
+
+    if (!res) return
+    const json = await res.json()
+    if (json.success) {
+      setLinkedinData(null)
+    } else {
+      setResumeDataError(json.error?.message || 'Failed to delete resume data.')
     }
   }
 
@@ -1056,6 +1157,9 @@ function PortfolioBuilder({ onLogout, onGoToBrowse, onRepoDeleted, autoStart = f
     }
     if (saved.profile && Object.keys(saved.profile).length > 0) {
       setProfile(p => ({ ...p, ...saved.profile }))
+    }
+    if (saved.linkedin) {
+      applyLinkedinData(saved.linkedin)
     }
     if (saved.repoMedia) {
       // Only restore entries that are valid media URLs — skips any accidentally saved text
@@ -1249,7 +1353,7 @@ function PortfolioBuilder({ onLogout, onGoToBrowse, onRepoDeleted, autoStart = f
                     Go to your <strong>LinkedIn profile page</strong> → click <strong>More…</strong> (below your photo) → <strong>Save to PDF</strong>.
                   </p>
                   <p style={{ margin: '0 0 10px', fontSize: '11px', color: '#9ca3af', lineHeight: 1.5 }}>
-                    Do not use Settings → Data Privacy export — that gives a ZIP file, not a PDF.
+                    Do not use Settings → Data Privacy export — that gives a ZIP file, not a PDF. Stored encrypted and reused automatically across all your portfolios — upload once, not per portfolio.
                   </p>
                   <input
                     type="file"
@@ -1279,7 +1383,7 @@ function PortfolioBuilder({ onLogout, onGoToBrowse, onRepoDeleted, autoStart = f
                 <div>
                   <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '10px' }}>
                     <span style={{ fontSize: '12px', fontWeight: '700', color: '#166534' }}>
-                      ✓ LinkedIn profile imported — fields auto-filled below
+                      ✓ Reused from your saved resume — fields auto-filled below
                     </span>
                     <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
                       <input
@@ -1294,16 +1398,21 @@ function PortfolioBuilder({ onLogout, onGoToBrowse, onRepoDeleted, autoStart = f
                         htmlFor="linkedin-pdf-reupload"
                         style={{ fontSize: '11px', color: '#0a66c2', cursor: 'pointer', fontWeight: '600' }}
                       >
-                        {linkedinUploading ? '⏳…' : '🔄 Re-upload'}
+                        {linkedinUploading ? '⏳…' : '🔄 Update resume'}
                       </label>
                       <button
-                        onClick={() => setLinkedinData(null)}
-                        style={{ background: 'none', border: 'none', color: '#9ca3af', fontSize: '11px', cursor: 'pointer', padding: 0 }}
+                        onClick={handleRemoveResumeData}
+                        disabled={resumeDataDeleting}
+                        title="Permanently delete your stored resume data (all portfolios)"
+                        style={{ background: 'none', border: 'none', color: '#9ca3af', fontSize: '11px', cursor: resumeDataDeleting ? 'not-allowed' : 'pointer', padding: 0 }}
                       >
-                        Remove
+                        {resumeDataDeleting ? 'Deleting…' : '🗑 Delete'}
                       </button>
                     </div>
                   </div>
+                  {resumeDataError && (
+                    <p style={{ margin: '0 0 8px', fontSize: '12px', color: '#dc2626' }}>{resumeDataError}</p>
+                  )}
                   <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', marginBottom: '10px' }}>
                     {linkedinData.name && (
                       <span style={{ padding: '2px 10px', borderRadius: '20px', fontSize: '11px', fontWeight: '600', backgroundColor: '#dcfce7', color: '#166534' }}>
@@ -1741,8 +1850,77 @@ function PortfolioBuilder({ onLogout, onGoToBrowse, onRepoDeleted, autoStart = f
               >
                 {publishing ? 'Publishing…' : isPublished ? '↗ Re-publish' : '↗ Publish Portfolio'}
               </button>
+
+              <button
+                onClick={toggleGithubPush}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: '5px',
+                  padding: '7px 14px', borderRadius: '7px',
+                  border: '1px solid #d1d5db', backgroundColor: githubPushOpen ? '#f3f4f6' : 'white',
+                  color: '#111827', fontWeight: '600', fontSize: '12px',
+                  cursor: 'pointer', transition: 'background-color 0.15s', whiteSpace: 'nowrap',
+                }}
+                title="Push this portfolio to a repo on your own GitHub account"
+              >
+                🐙 Push to GitHub
+              </button>
             </div>
           </div>
+
+          {/* Push to GitHub panel */}
+          {githubPushOpen && (
+            <div style={{
+              padding: '14px 18px', borderBottom: '1px solid #e5e7eb', backgroundColor: '#f9fafb', flexShrink: 0,
+              display: 'flex', flexDirection: 'column', gap: '8px',
+            }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <label style={{ fontSize: '12px', fontWeight: '600', color: '#374151', whiteSpace: 'nowrap' }}>
+                  Repo name
+                </label>
+                <input
+                  type="text"
+                  value={githubRepoName}
+                  onChange={e => setGithubRepoName(e.target.value)}
+                  disabled={githubPushing}
+                  style={{
+                    flex: 1, maxWidth: '280px', padding: '6px 10px', borderRadius: '6px',
+                    border: '1px solid #d1d5db', fontSize: '12px',
+                  }}
+                />
+                <button
+                  onClick={handleGithubPush}
+                  disabled={githubPushing || !githubRepoName.trim()}
+                  style={{
+                    padding: '6px 14px', borderRadius: '6px', border: 'none',
+                    backgroundColor: githubPushing ? '#a5b4fc' : '#4f46e5',
+                    color: 'white', fontWeight: '600', fontSize: '12px',
+                    cursor: githubPushing ? 'not-allowed' : 'pointer',
+                  }}
+                >
+                  {githubPushing ? 'Pushing…' : 'Confirm'}
+                </button>
+              </div>
+              {githubPushResult && (
+                <p style={{ margin: 0, fontSize: '12px', color: '#16a34a' }}>
+                  ✓ Pushed to{' '}
+                  <a href={githubPushResult.repoUrl} target="_blank" rel="noopener noreferrer" style={{ color: '#16a34a', fontWeight: '600' }}>
+                    {githubPushResult.repoUrl}
+                  </a>
+                  {typeof githubPushResult.projectsSynced === 'number' &&
+                    ` — synced ${githubPushResult.projectsSynced} project${githubPushResult.projectsSynced === 1 ? '' : 's'}` +
+                    (githubPushResult.projectsRemoved ? `, removed ${githubPushResult.projectsRemoved}` : '')}
+                </p>
+              )}
+              {githubPushError && (
+                <p style={{ margin: 0, fontSize: '12px', color: '#dc2626' }}>
+                  {githubPushError}
+                  {githubPushError.includes('Connect your GitHub') && (
+                    <> — <a href="/settings" style={{ color: '#dc2626', fontWeight: '600' }}>go to Settings</a></>
+                  )}
+                </p>
+              )}
+            </div>
+          )}
 
           {/* Live preview */}
           <div style={{ flex: 1, overflowY: 'auto', padding: '20px' }}>

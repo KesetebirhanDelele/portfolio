@@ -3,11 +3,12 @@ const multer    = require('multer');
 const pdfjsLib  = require('pdfjs-dist/legacy/build/pdf.js');
 const pool = require('../db/postgres');
 const authMiddleware = require('../middleware/authMiddleware');
-const { generatePortfolioNarrative, extractLinkedInProfile, generateProjectDescription } = require('../services/openai');
+const { generatePortfolioNarrative, extractLinkedInProfile, generateProjectDescription, generateProjectCaseStudy, CASE_STUDY_PROMPT_VERSION } = require('../services/openai');
 const { generatePortfolioPdf } = require('../services/pdfGenerator');
 const { TECH_CATEGORIES, TECH_LABELS } = require('../services/techMaps');
 const { publishPortfolioAsGithubRepo } = require('../services/githubPortfolioPublisher');
-const { decryptGithubToken } = require('../services/githubTokenCrypto');
+const { getGithubInfo } = require('../services/githubTokenResolver');
+const { getResumeData, saveResumeData, deleteResumeData } = require('../services/resumeDataResolver');
 
 const router = express.Router();
 const upload  = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024 } });
@@ -212,7 +213,7 @@ router.get('/public/:slug', async (req, res) => {
 
   try {
     const portfolioResult = await pool.query(
-      `SELECT id, title, slug, content_json, published_at
+      `SELECT id, user_id, title, slug, content_json, published_at
        FROM portfolios
        WHERE slug = $1 AND status = 'published' AND visibility = 'public'`,
       [slug]
@@ -227,7 +228,7 @@ router.get('/public/:slug', async (req, res) => {
 
     const reposResult = await pool.query(
       `SELECT r.id AS repo_id, r.name, r.full_name, r.description,
-              r.primary_language, r.stars_count, r.forks_count, r.topics,
+              r.primary_language, r.stars_count, r.forks_count, r.topics, r.image_url,
               a.confidence_score, a.skills_json, a.summary_json,
               da.code_intelligence_json
        FROM repositories r
@@ -257,7 +258,9 @@ router.get('/public/:slug', async (req, res) => {
       stars:       r.stars_count,
       forks:       r.forks_count,
       topics:      r.topics,
-      gifUrl:      repoMedia[r.repo_id]?.gifUrl || null,
+      // Manually-pasted media wins when set; otherwise fall back to the
+      // image auto-captured at Colaberry import time (M64.3).
+      gifUrl:      repoMedia[r.repo_id]?.gifUrl || r.image_url || null,
       analysis: r.skills_json ? {
         confidenceScore: r.confidence_score,
         technologies:    mergeTechnologies(r.skills_json, r.code_intelligence_json),
@@ -270,7 +273,7 @@ router.get('/public/:slug', async (req, res) => {
 
     const narrative = portfolio.content_json?.narrative || {};
     const profile   = portfolio.content_json?.profile   || {};
-    const linkedin  = portfolio.content_json?.linkedin  || null;
+    const linkedin  = await getResumeData(portfolio.user_id);
 
     return res.status(200).json({
       success: true,
@@ -301,7 +304,7 @@ router.get('/public/:slug/pdf', async (req, res) => {
 
   try {
     const portfolioResult = await pool.query(
-      `SELECT id, title, slug, content_json
+      `SELECT id, user_id, title, slug, content_json
        FROM portfolios
        WHERE slug = $1 AND status = 'published' AND visibility = 'public'`,
       [slug]
@@ -337,7 +340,7 @@ router.get('/public/:slug/pdf', async (req, res) => {
 
     const narrative      = portfolio.content_json?.narrative || {};
     const profile        = portfolio.content_json?.profile   || {};
-    const linkedin       = portfolio.content_json?.linkedin  || {};
+    const linkedin       = (await getResumeData(portfolio.user_id)) || {};
     const githubUsername = reposResult.rows.find(r => r.full_name)?.full_name?.split('/')?.[0] || null;
 
     const repos = reposResult.rows.map(r => ({
@@ -347,6 +350,7 @@ router.get('/public/:slug/pdf', async (req, res) => {
       analysis: r.skills_json ? {
         technologies: r.skills_json,
         whatItDoes:   r.summary_json?.what_it_does,
+        summary:      r.summary_json?.text,
         strengths:    r.summary_json?.highlights?.strengths,
       } : null,
       intelligence:     r.intelligence_json    || null,
@@ -447,7 +451,7 @@ router.get('/:id', authMiddleware, async (req, res) => {
         narrative:       portfolio.content_json?.narrative  || null,
         narrativeStatus: portfolio.content_json?.narrative_status || null,
         profile:         portfolio.content_json?.profile    || {},
-        linkedin:        portfolio.content_json?.linkedin   || null,
+        linkedin:        await getResumeData(userId),
         repoMedia:       portfolio.content_json?.repo_media || {},
         publishedAt:     portfolio.published_at,
         createdAt:       portfolio.created_at,
@@ -781,13 +785,7 @@ router.post('/:id/publish-github-repo', authMiddleware, async (req, res) => {
   }
 
   try {
-    const userResult = await pool.query(
-      'SELECT github_username, encrypted_github_access_token, github_access_token_iv FROM users WHERE id = $1',
-      [userId]
-    );
-    const userRow = userResult.rows[0] || {};
-    const owner = userRow.github_username;
-    const token = decryptGithubToken(userRow.encrypted_github_access_token, userRow.github_access_token_iv);
+    const { github_username: owner, github_access_token: token } = await getGithubInfo(userId);
     if (!owner || !token) {
       return res.status(400).json({
         success: false,
@@ -811,10 +809,102 @@ router.post('/:id/publish-github-repo', authMiddleware, async (req, res) => {
       });
     }
     const profile = portfolioResult.rows[0].content_json?.profile || {};
+    if (!profile?.fullName?.trim()) {
+      return res.status(400).json({
+        success: false,
+        error: { code: 'PROFILE_INCOMPLETE', message: 'Add your name in the profile section before publishing.' },
+      });
+    }
 
-    const { repoUrl, created } = await publishPortfolioAsGithubRepo({ token, owner, repoName, narrative, profile });
+    const resumeSummary = (await getResumeData(userId))?.summary || null;
 
-    return res.status(200).json({ success: true, data: { repoUrl, created } });
+    // Resolve each project's uploaded media (repo_media, keyed by repo id) to
+    // a repoName -> imageUrl map so the README can show real project images,
+    // same source PublicPortfolio.jsx already uses for the public page.
+    const repositoryIds = portfolioResult.rows[0].content_json?.repository_ids || [];
+    const repoMedia = portfolioResult.rows[0].content_json?.repo_media || {};
+    let projectImages = {};
+    if (repositoryIds.length > 0) {
+      const reposResult = await pool.query(
+        'SELECT id, name, image_url FROM repositories WHERE id = ANY($1::uuid[])',
+        [repositoryIds]
+      );
+      // Manually-pasted media (repo_media) wins when set; otherwise fall back
+      // to the image auto-captured at Colaberry import time (M64.3).
+      projectImages = Object.fromEntries(
+        reposResult.rows
+          .map(r => [r.name, repoMedia[r.id]?.gifUrl || r.image_url || null])
+          .filter(([, url]) => url)
+      );
+    }
+
+    // Resolve per-project case studies (Business Problem/Objective/Workflow/
+    // Key Insights/Business Impact) for the project-*/README.md pages (M65).
+    // Cached on repositories.case_study_json so republishing an unchanged
+    // project doesn't re-call OpenAI every time.
+    let caseStudies = {};
+    if (repositoryIds.length > 0) {
+      const caseStudyRepos = await pool.query(
+        `SELECT r.id AS repo_id, r.name, r.provider, r.description AS repo_description,
+                r.readme_content, r.case_study_json,
+                a.summary_json,
+                da.intelligence_json,
+                da.code_intelligence_json
+         FROM repositories r
+         LEFT JOIN LATERAL (
+           SELECT summary_json FROM analyses
+           WHERE repository_id = r.id AND status = 'completed'
+           ORDER BY created_at DESC LIMIT 1
+         ) a ON true
+         LEFT JOIN LATERAL (
+           SELECT intelligence_json, code_intelligence_json FROM deep_analyses
+           WHERE repository_id = r.id AND status IN ('completed', 'partial')
+           ORDER BY completed_at DESC LIMIT 1
+         ) da ON true
+         WHERE r.id = ANY($1::uuid[]) AND r.user_id = $2`,
+        [repositoryIds, userId]
+      );
+
+      await Promise.all(caseStudyRepos.rows.map(async r => {
+        // A cached case study only counts as fresh if it was generated by
+        // the current prompt version — otherwise treat it the same as
+        // missing and regenerate. This is what lets a future prompt change
+        // (bumping CASE_STUDY_PROMPT_VERSION) reach every already-published
+        // project automatically on its next publish, with no manual
+        // backfill script (M65.1).
+        if (r.case_study_json && r.case_study_json.version === CASE_STUDY_PROMPT_VERSION) {
+          caseStudies[r.name] = r.case_study_json;
+          return;
+        }
+        try {
+          const intel = r.intelligence_json;
+          const codeIntel = r.code_intelligence_json;
+          const caseStudy = await generateProjectCaseStudy({
+            repoName: r.name,
+            isColaberrySourced: r.provider === 'colaberry',
+            readmeContent: r.readme_content || '',
+            whatItDoes: r.summary_json?.what_it_does || '',
+            hookSentence: intel?.portfolioNarrative?.hookSentence || r.repo_description || '',
+            technologies: codeIntel?.technologies || [],
+            operationalCapabilities: intel?.businessValue?.operationalCapabilities || [],
+            impactStatements: intel?.resume?.impactStatements || [],
+            probableDomain: intel?.businessValue?.probableDomain || '',
+          });
+          if (caseStudy) {
+            caseStudies[r.name] = caseStudy;
+            await pool.query('UPDATE repositories SET case_study_json = $1 WHERE id = $2', [JSON.stringify(caseStudy), r.repo_id]);
+          }
+        } catch (err) {
+          console.error(`[portfolios] case study generation failed for ${r.name}:`, err.message);
+        }
+      }));
+    }
+
+    const { repoUrl, created, projectsSynced, projectsRemoved } = await publishPortfolioAsGithubRepo({
+      token, owner, repoName, narrative, profile, resumeSummary, projectImages, caseStudies,
+    });
+
+    return res.status(200).json({ success: true, data: { repoUrl, created, projectsSynced, projectsRemoved } });
   } catch (err) {
     const status = err.response?.status === 422 ? 409 : 500;
     console.error('[portfolios] publish-github-repo error:', err.message);
@@ -911,6 +1001,20 @@ router.post('/:id/generate-project-descriptions', authMiddleware, async (req, re
   }
 });
 
+// DELETE /api/portfolios/resume-data — permanently remove the user's stored
+// LinkedIn/resume data (M64.2). Single record, so this removes it from every
+// portfolio's view in one call — there's nothing left duplicated elsewhere.
+router.delete('/resume-data', authMiddleware, async (req, res) => {
+  const { id: userId } = req.user;
+  try {
+    await deleteResumeData(userId);
+    return res.status(200).json({ success: true });
+  } catch (err) {
+    console.error('[resume-data] delete error:', err.message);
+    return res.status(500).json({ success: false, error: { code: 'SERVER_ERROR', message: 'Failed to delete resume data.' } });
+  }
+});
+
 // POST /api/portfolios/extract-linkedin — upload PDF, extract profile fields, return JSON (no DB save)
 router.post('/extract-linkedin', authMiddleware, upload.single('pdf'), async (req, res) => {
   if (!req.file) {
@@ -958,17 +1062,15 @@ router.post('/:id/linkedin-pdf', authMiddleware, upload.single('pdf'), async (re
     return res.status(400).json({ success: false, error: { code: 'INVALID_FILE', message: 'Please upload a PDF file.' } });
   }
 
-  // ── Step 1: Load portfolio ──────────────────────────────────────────────────
-  let portfolioRow;
+  // ── Step 1: Confirm the portfolio exists and belongs to this user ──────────
   try {
     const result = await pool.query(
-      `SELECT id, content_json FROM portfolios WHERE id = $1 AND user_id = $2`,
+      `SELECT id FROM portfolios WHERE id = $1 AND user_id = $2`,
       [id, userId]
     );
     if (!result.rows[0]) {
       return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Portfolio not found.' } });
     }
-    portfolioRow = result.rows[0];
   } catch (err) {
     console.error('[linkedin-pdf] DB load error:', err.message);
     return res.status(500).json({ success: false, error: { code: 'SERVER_ERROR', message: 'Database error loading portfolio.' } });
@@ -999,14 +1101,13 @@ router.post('/:id/linkedin-pdf', authMiddleware, upload.single('pdf'), async (re
     return res.status(500).json({ success: false, error: { code: 'EXTRACTION_FAILED', message: 'AI extraction failed. Please try again in a moment.' } });
   }
 
-  // ── Step 4: Save to portfolio ──────────────────────────────────────────────
+  // ── Step 4: Save to the user's encrypted resume-data record (M64.2) ────────
+  // Stored once per user, not per portfolio — every portfolio (this one and
+  // any future one) reads the same record via getResumeData(), so uploading
+  // here updates it everywhere at once instead of leaving stale copies.
   try {
-    const updated = { ...portfolioRow.content_json, linkedin: extracted };
-    await pool.query(
-      `UPDATE portfolios SET content_json = $1, updated_at = NOW() WHERE id = $2`,
-      [JSON.stringify(updated), id]
-    );
-    console.log(`[linkedin-pdf] saved for portfolio ${id}`);
+    await saveResumeData(userId, extracted);
+    console.log(`[linkedin-pdf] resume data saved for user ${userId} (uploaded via portfolio ${id})`);
     return res.status(200).json({ success: true, data: extracted });
   } catch (err) {
     console.error('[linkedin-pdf] DB save error:', err.message);
