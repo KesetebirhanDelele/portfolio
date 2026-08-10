@@ -47,6 +47,25 @@ router.get('/installed', async (req, res) => {
   }
 
   try {
+    // installation_id is a client-supplied, unauthenticated query param —
+    // getInstallation()/getInstallationToken() authenticate as the GitHub
+    // App itself (app-wide credentials), not as this specific user, so
+    // nothing here proves the caller is who actually completed GitHub's
+    // consent screen for THIS installation_id. Without the ownership check
+    // below, any logged-in user could mint their own valid `state` (just by
+    // starting the connect flow for themselves) and replay this URL with a
+    // different org's real installation_id to silently reassign that org's
+    // installation — and the private-repo access it grants — to themselves.
+    // See PROGRESS.md M62.
+    const existing = await pool.query(
+      `SELECT user_id FROM github_app_installations WHERE installation_id = $1`,
+      [String(installation_id)]
+    );
+    if (existing.rows[0] && existing.rows[0].user_id !== userId) {
+      console.warn(`[github-app] rejected installation ${installation_id} reassignment attempt: already owned by a different user`);
+      return res.redirect(`${frontendUrl}/settings?error=installation_already_claimed`);
+    }
+
     const installation = await getInstallation(installation_id);
     const accountLogin  = installation.account.login;
     const accountType   = installation.account.type;   // 'User' or 'Organization'
@@ -57,7 +76,6 @@ router.get('/installed', async (req, res) => {
          (user_id, installation_id, account_login, account_type, account_avatar_url)
        VALUES ($1, $2, $3, $4, $5)
        ON CONFLICT (installation_id) DO UPDATE SET
-         user_id            = EXCLUDED.user_id,
          account_login      = EXCLUDED.account_login,
          account_type       = EXCLUDED.account_type,
          account_avatar_url = EXCLUDED.account_avatar_url,

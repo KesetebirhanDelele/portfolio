@@ -1390,3 +1390,34 @@ Committed M47/M47.1 (commit `3b197d9`), then ran the deferred "npm install + boo
 **Next Actions:** User to (1) re-upload their LinkedIn PDF to test real certification extraction, (2) regenerate the narrative for any existing portfolio to pick up the tech-stack/bullets fix, (3) confirm the live public page and downloaded PDF both look right.
 
 ---
+
+### M62 — SECURITY: fixed a cross-user private-repo disclosure vulnerability in the GitHub App installation callback *(2026-08-10)*
+**Session:** CC-20260809-8f3k
+
+**User asked directly: "Is there a chance that anyone can use a public github account and fetch private repos of another developer?"** Audited every token-resolution path rather than answering from assumption.
+
+**Audited and confirmed safe:** the per-user OAuth token path (`getTokenForOwner`, `getGithubAccounts`, `getGithubInfo` in `services/githubTokenResolver.js`) and every repo/analysis GET/POST route (`repos.js`, `deepAnalysis.js`, `analysis.js`, `colaberryImport.js`, `colaberryLiveLogin.js`, the WS proxy) — all derive `userId` exclusively from `req.user.id` (server-verified JWT via `authMiddleware`, never a client-supplied param), and every SQL query touching `repositories`/`deep_analyses`/`analyses`/`colaberry_sessions` filters `WHERE user_id = $userId` or an equivalent ownership JOIN. Grepped for the classic IDOR pattern (`req.body.userId`/`req.query.userId`/`req.params.userId`) — zero matches anywhere in the codebase.
+
+**Found a real one in the GitHub App installation path.** `GET /api/github-app/installed` (`routes/githubApp.js`) — the callback GitHub redirects to after an app install — can't use `authMiddleware` (it's a browser redirect, no Authorization header available), so it authenticates the caller via a self-issued `state` JWT instead, which is the correct standard pattern. But it also trusted a **client-supplied `installation_id` query param** with no check that the specific installation actually belongs to whoever's completing the flow, and wrote `github_app_installations` with `ON CONFLICT (installation_id) DO UPDATE SET user_id = EXCLUDED.user_id` — silently reassigning ownership to whoever called the URL most recently.
+
+**The actual attack:** `getInstallation()`/`getInstallationToken()` (`services/githubApp.js`) authenticate as the GitHub App itself (an app-wide RS256 JWT via `GITHUB_APP_ID`/`GITHUB_APP_PRIVATE_KEY_BASE64`), not as any specific user. Any logged-in R2R user can mint their own valid `state` just by starting the connect flow for themselves, then replay `GET /api/github-app/installed?installation_id=<someone else's real ID>&state=<their own state>` directly — no race condition needed, exploitable at any time after the real installation exists, since nothing previously stopped re-attribution. Once reassigned, `getAppInstallations()` returns the stolen installation, `getTokenForOwner()` mints a real installation access token for it, and `getInstallationRepos()`/repo import surface that org's **private repositories** to the attacker.
+
+**Not currently live:** `GITHUB_APP_SLUG`/`GITHUB_APP_ID`/`GITHUB_APP_PRIVATE_KEY_BASE64` are unconfigured in this deployment — `/install` 500s immediately, so the flow can't even be initiated right now. Fixed anyway rather than deferred, since this is exactly the kind of bug that goes live silently the moment those env vars are set for production.
+
+**Fixed:** added an ownership check before any GitHub call — if `installation_id` already belongs to a different `user_id`, reject with a redirect (`error=installation_already_claimed`) instead of reassigning. Removed `user_id` from the `ON CONFLICT ... DO UPDATE SET` clause entirely so a conflict can never silently change ownership, only refresh metadata (`account_login`, `account_type`, `avatar_url`) for the same owner.
+
+**Validation (live, against the real running backend and real DB — not a code-review-only finding):**
+- Reproduced the exploit end-to-end pre-fix conceptually via code trace, then built a real test: inserted a throwaway "victim" user + a `github_app_installations` row owned by them, minted a valid `state` JWT for the real existing user (as attacker), and hit the actual live `/api/github-app/installed` endpoint with the victim's `installation_id`.
+- **Before restarting the backend with the fix:** the request "succeeded" only because `getInstallation()` threw on missing config — a false negative, not proof of the fix. Restarted the backend to load the actual code change and re-ran the same test.
+- **After the fix, confirmed via live HTTP call:** response redirected to `error=installation_already_claimed` (proving the new rejection branch fired, not an unrelated config error), and a direct DB query confirmed the installation's `user_id` was unchanged — still the victim's.
+- **Also verified the fix doesn't break the legitimate case:** same test with the real owner's own `state` correctly passed the ownership check and proceeded to the (expected, unrelated) `server_error` from the still-unconfigured GitHub App credentials — proving same-owner reinstalls aren't blocked.
+- Test rows cleaned up after verification (no leftover fake users/installations in the DB).
+- `node -c routes/githubApp.js` — syntax clean.
+
+**Risks / Limitations:**
+- A narrower residual risk remains: an installation that exists on GitHub's side (a real org genuinely installed the app) but has **never yet been claimed by anyone** in `github_app_installations` could still be first-claimed by an attacker who guesses/knows its `installation_id` before the legitimate org's user ever completes the flow themselves. This fix closes the dominant, always-exploitable "steal an already-bound installation at any time" vector; it does not add a cryptographic binding between the original `/install` redirect and the specific `installation_id` GitHub later assigns (GitHub doesn't allocate the ID until after consent, so it can't be pre-committed in the `state` JWT). Given the feature is entirely unconfigured/inactive in this deployment, this residual gap is documented rather than closed with a heavier nonce-based redesign right now — worth revisiting before GitHub App support is actually turned on in production.
+- This audit covered the GitHub OAuth, GitHub App, and Colaberry token/session paths. It did not re-audit every route in the codebase line-by-line (e.g., billing/admin routes, if any) — scoped to "can someone reach another developer's private repo content," which was the actual question asked.
+
+**Next Actions:** Before ever configuring `GITHUB_APP_SLUG`/`GITHUB_APP_ID`/`GITHUB_APP_PRIVATE_KEY_BASE64` for production, revisit the residual first-claim race noted above and confirm whether a nonce-based binding is warranted at that point.
+
+---
