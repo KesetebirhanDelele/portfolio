@@ -5,8 +5,9 @@ const authMiddleware = require('../middleware/authMiddleware');
 const { generateReadme } = require('../services/openai');
 const { queueAnalysis }        = require('../services/analysisQueue');
 const { queueDeepAnalysis }    = require('../services/deepAnalysisQueue');
-const { getInstallationRepos, getInstallationToken } = require('../services/githubApp');
+const { getInstallationRepos } = require('../services/githubApp');
 const { GENERATED_PORTFOLIO_TOPIC } = require('../services/githubPortfolioPublisher');
+const { getGithubInfo, getGithubAccounts, getAppInstallations, getTokenForOwner } = require('../services/githubTokenResolver');
 
 const router = express.Router();
 
@@ -28,48 +29,9 @@ function makeGithubHeaders(userToken) {
   };
 }
 
-async function getGithubInfo(userId) {
-  const result = await pool.query(
-    'SELECT github_username, github_access_token FROM users WHERE id = $1',
-    [userId]
-  );
-  return result.rows[0] || {};
-}
-
-async function getGithubAccounts(userId) {
-  const result = await pool.query(
-    `SELECT id, github_username, access_token, is_primary
-     FROM github_accounts
-     WHERE user_id = $1
-     ORDER BY is_primary DESC, connected_at ASC`,
-    [userId]
-  );
-  return result.rows;
-}
-
-async function getAppInstallations(userId) {
-  const result = await pool.query(
-    'SELECT installation_id, account_login FROM github_app_installations WHERE user_id = $1',
-    [userId]
-  );
-  return result.rows;
-}
-
-// Resolve the best token to use when importing a repo owned by `owner`
-async function getTokenForOwner(userId, owner) {
-  const accounts = await getGithubAccounts(userId);
-  const oauthMatch = accounts.find(a => a.github_username.toLowerCase() === owner.toLowerCase());
-  if (oauthMatch) return oauthMatch.access_token;
-
-  const installations = await getAppInstallations(userId);
-  const appMatch = installations.find(i => i.account_login.toLowerCase() === owner.toLowerCase());
-  if (appMatch) {
-    try { return await getInstallationToken(appMatch.installation_id); } catch { /* fall through */ }
-  }
-
-  const primary = accounts.find(a => a.is_primary) || accounts[0];
-  return primary?.access_token || null;
-}
+// getGithubInfo / getGithubAccounts / getAppInstallations / getTokenForOwner
+// now live in services/githubTokenResolver.js — shared with the deep-analysis
+// pipeline so both decrypt tokens the same way. See PROGRESS.md M53.
 
 async function fetchReadme(owner, repo, userToken) {
   try {

@@ -6,6 +6,7 @@ const authMiddleware = require('../middleware/authMiddleware');
 const { runDeepAnalysisPipeline, retryFailedPhases } = require('../services/deepAnalysisPipeline');
 const { enrichRepository } = require('../services/githubEnricher');
 const { analyzeRepositoryIntelligence } = require('../services/codeIntelligence');
+const { getTokenForOwner } = require('../services/githubTokenResolver');
 
 const router = express.Router();
 
@@ -25,66 +26,73 @@ const VALID_REANALYZE_MODES = new Set([
 
 // ── Phase implementations ────────────────────────────────────────────────────
 // Each must return { data, meta?, dbUpdate? } or throw on failure.
+//
+// buildPhaseImpls(token) rebuilds this per-call so enrichment uses the
+// resolved repo owner's own OAuth token instead of a single shared fallback
+// token — see PROGRESS.md M53 (private-repo enrichment was silently broken
+// for every user without this; the shared GITHUB_TOKEN fallback also hit
+// unauthenticated-tier rate limits fast with multiple repos).
+function buildPhaseImpls(token) {
+  return {
+    enrichment: (repoData) => enrichRepository(repoData, token),
 
-const PHASE_IMPLS = {
-  enrichment: enrichRepository,
+    // ── Phase 2: Code Intelligence ────────────────────────────────────────────
+    // Deterministic — no AI calls, no embeddings, no network I/O.
+    // Reads fileContents from the enrichment output and returns structured
+    // technology / domain signals ready for downstream phases and the DB.
+    //
+    // Input:  enrichResult.data  (github_enrichment_json)
+    //         { fileContents, rankedFiles, repoMeta, complexity, summary }
+    //
+    // Output: { data: intelligence, meta, dbUpdate: { code_intelligence_json } }
+    async codeIntelligence(enrichmentData) {
+      const filesAvailable = Object.keys(enrichmentData?.fileContents ?? {}).length;
+      console.log('[deep-analysis][codeIntelligence] Starting —', {
+        filesAvailable,
+        complexity: enrichmentData?.complexity?.complexity ?? 'unknown',
+        repoFullName: enrichmentData?.repoMeta?.fullName ?? 'unknown',
+      });
 
-  // ── Phase 2: Code Intelligence ────────────────────────────────────────────
-  // Deterministic — no AI calls, no embeddings, no network I/O.
-  // Reads fileContents from the enrichment output and returns structured
-  // technology / domain signals ready for downstream phases and the DB.
-  //
-  // Input:  enrichResult.data  (github_enrichment_json)
-  //         { fileContents, rankedFiles, repoMeta, complexity, summary }
-  //
-  // Output: { data: intelligence, meta, dbUpdate: { code_intelligence_json } }
-  async codeIntelligence(enrichmentData) {
-    const filesAvailable = Object.keys(enrichmentData?.fileContents ?? {}).length;
-    console.log('[deep-analysis][codeIntelligence] Starting —', {
-      filesAvailable,
-      complexity: enrichmentData?.complexity?.complexity ?? 'unknown',
-      repoFullName: enrichmentData?.repoMeta?.fullName ?? 'unknown',
-    });
+      // analyzeRepositoryIntelligence is internally fault-tolerant.
+      // It never throws — bad files are isolated and counted in meta.filesSkipped.
+      const result = analyzeRepositoryIntelligence(enrichmentData);
 
-    // analyzeRepositoryIntelligence is internally fault-tolerant.
-    // It never throws — bad files are isolated and counted in meta.filesSkipped.
-    const result = analyzeRepositoryIntelligence(enrichmentData);
+      // Conform meta to the codeIntelligence phase tracking schema.
+      // phase_metrics_json.codeIntelligence will store exactly these fields.
+      const meta = {
+        filesAnalyzed:        result.meta.filesAnalyzed,
+        signalsExtracted:     result.meta.totalSignals,
+        frameworksDetected:   result.data.frameworks.length,
+        technologiesDetected: result.data.technologies.length,
+        confidenceScore:      result.meta.confidenceScore,
+      };
 
-    // Conform meta to the codeIntelligence phase tracking schema.
-    // phase_metrics_json.codeIntelligence will store exactly these fields.
-    const meta = {
-      filesAnalyzed:        result.meta.filesAnalyzed,
-      signalsExtracted:     result.meta.totalSignals,
-      frameworksDetected:   result.data.frameworks.length,
-      technologiesDetected: result.data.technologies.length,
-      confidenceScore:      result.meta.confidenceScore,
-    };
+      console.log('[deep-analysis][codeIntelligence] Completed —', {
+        dominantStack:    result.data.dominantStack,
+        detectedDomains:  result.data.detectedDomains,
+        ...meta,
+      });
 
-    console.log('[deep-analysis][codeIntelligence] Completed —', {
-      dominantStack:    result.data.dominantStack,
-      detectedDomains:  result.data.detectedDomains,
-      ...meta,
-    });
-
-    return {
-      data:     result.data,           // passed to Phase 5 (intelligenceAgents) as ciResult.data
-      meta,                            // stored in phase_metrics_json.codeIntelligence
-      dbUpdate: result.dbUpdate,       // { code_intelligence_json: <intelligence object> }
-    };
-  },
-  async fileClassification() {
-    throw Object.assign(new Error('File classification phase not yet implemented'), { code: 'NOT_IMPLEMENTED' });
-  },
-  async semanticChunking() {
-    throw Object.assign(new Error('Semantic chunking phase not yet implemented'), { code: 'NOT_IMPLEMENTED' });
-  },
-  async intelligenceAgents() {
-    throw Object.assign(new Error('Intelligence agents phase not yet implemented'), { code: 'NOT_IMPLEMENTED' });
-  },
-  async inferenceEngine() {
-    throw Object.assign(new Error('Inference engine phase not yet implemented'), { code: 'NOT_IMPLEMENTED' });
-  },
-};
+      return {
+        data:     result.data,           // passed to Phase 5 (intelligenceAgents) as ciResult.data
+        meta,                            // stored in phase_metrics_json.codeIntelligence
+        dbUpdate: result.dbUpdate,       // { code_intelligence_json: <intelligence object> }
+      };
+    },
+    async fileClassification() {
+      throw Object.assign(new Error('File classification phase not yet implemented'), { code: 'NOT_IMPLEMENTED' });
+    },
+    async semanticChunking() {
+      throw Object.assign(new Error('Semantic chunking phase not yet implemented'), { code: 'NOT_IMPLEMENTED' });
+    },
+    async intelligenceAgents() {
+      throw Object.assign(new Error('Intelligence agents phase not yet implemented'), { code: 'NOT_IMPLEMENTED' });
+    },
+    async inferenceEngine() {
+      throw Object.assign(new Error('Inference engine phase not yet implemented'), { code: 'NOT_IMPLEMENTED' });
+    },
+  };
+}
 
 // ── Repo query helper ─────────────────────────────────────────────────────────
 
@@ -135,11 +143,13 @@ router.post('/run', authMiddleware, async (req, res) => {
       const e = existing.rows[0];
       // If it's queued but no process is running it (server restart), re-kick pipeline
       if (e.status === 'queued') {
-        setImmediate(() =>
-          runDeepAnalysisPipeline(e.id, repoData, PHASE_IMPLS).catch(err =>
+        const [owner] = repoData.full_name.split('/');
+        setImmediate(async () => {
+          const token = await getTokenForOwner(userId, owner).catch(() => null);
+          runDeepAnalysisPipeline(e.id, repoData, buildPhaseImpls(token)).catch(err =>
             console.error(`[deepAnalysis] resume pipeline error for ${e.id}:`, err.message),
-          ),
-        );
+          );
+        });
       }
       return res.status(200).json({
         success: true,
@@ -162,11 +172,13 @@ router.post('/run', authMiddleware, async (req, res) => {
 
     const analysisId = inserted.rows[0].id;
 
-    setImmediate(() =>
-      runDeepAnalysisPipeline(analysisId, repoData, PHASE_IMPLS).catch(err =>
+    const [owner] = repoData.full_name.split('/');
+    setImmediate(async () => {
+      const token = await getTokenForOwner(userId, owner).catch(() => null);
+      runDeepAnalysisPipeline(analysisId, repoData, buildPhaseImpls(token)).catch(err =>
         console.error(`[deepAnalysis] unhandled pipeline error for ${analysisId}:`, err.message),
-      ),
-    );
+      );
+    });
 
     return res.status(202).json({
       success: true,
@@ -284,8 +296,10 @@ router.post('/:repoId/reanalyze', authMiddleware, async (req, res) => {
 
     analysisId = inserted.rows[0].id;
 
-    setImmediate(() =>
-      runDeepAnalysisPipeline(analysisId, repoData, PHASE_IMPLS).catch(err =>
+    const [reanalyzeOwner] = repoData.full_name.split('/');
+    setImmediate(async () => {
+      const token = await getTokenForOwner(userId, reanalyzeOwner).catch(() => null);
+      runDeepAnalysisPipeline(analysisId, repoData, buildPhaseImpls(token)).catch(err =>
         console.error('[deep-analysis][pipeline] Unhandled pipeline error:', {
           repoId,
           analysisId,
@@ -293,8 +307,8 @@ router.post('/:repoId/reanalyze', authMiddleware, async (req, res) => {
           code:    err.code,
           stack:   err.stack,
         }),
-      ),
-    );
+      );
+    });
 
     console.log(`[deepAnalysis] reanalyze queued — repo=${repoId} analysis=${analysisId} mode=${reanalyzeMode} prev=${previousAnalysisId}`);
 
@@ -586,7 +600,7 @@ router.post('/:analysisId/retry', authMiddleware, async (req, res) => {
 
   try {
     const ownerCheck = await pool.query(
-      `SELECT da.id, da.status, da.phase_errors_json
+      `SELECT da.id, da.status, da.phase_errors_json, r.full_name
        FROM deep_analyses da
        JOIN repositories r ON r.id = da.repository_id
        WHERE da.id = $1 AND r.user_id = $2`,
@@ -600,7 +614,7 @@ router.post('/:analysisId/retry', authMiddleware, async (req, res) => {
       });
     }
 
-    const { status, phase_errors_json: phaseErrors } = ownerCheck.rows[0];
+    const { status, phase_errors_json: phaseErrors, full_name: retryFullName } = ownerCheck.rows[0];
 
     if (status === 'running' || status === 'queued') {
       return res.status(409).json({
@@ -620,11 +634,13 @@ router.post('/:analysisId/retry', authMiddleware, async (req, res) => {
       });
     }
 
-    setImmediate(() =>
-      retryFailedPhases(analysisId, PHASE_IMPLS).catch(err =>
+    const [retryOwner] = retryFullName.split('/');
+    setImmediate(async () => {
+      const token = await getTokenForOwner(userId, retryOwner).catch(() => null);
+      retryFailedPhases(analysisId, buildPhaseImpls(token)).catch(err =>
         console.error(`[deepAnalysis] retry error for ${analysisId}:`, err.message),
-      ),
-    );
+      );
+    });
 
     return res.status(202).json({
       success: true,

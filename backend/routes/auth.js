@@ -4,6 +4,7 @@ const axios   = require('axios');
 const crypto  = require('crypto');
 const jwt     = require('jsonwebtoken');
 const pool    = require('../db/postgres');
+const { encryptGithubToken } = require('../services/githubTokenCrypto');
 
 const router = express.Router();
 
@@ -89,6 +90,9 @@ router.get('/github/callback', async (req, res) => {
 
     const accessToken = tokenRes.data.access_token;
     const ghHeaders = { Authorization: `token ${accessToken}`, 'User-Agent': 'Repo2Reputation/1.0' };
+    // Encrypted once here — every storage site below uses the ciphertext,
+    // never the raw token (see PROGRESS.md M53: tokens were plaintext before).
+    const { encryptedToken, tokenIv } = encryptGithubToken(accessToken);
 
     // Fetch GitHub profile + emails
     const [profileRes, emailsRes] = await Promise.all([
@@ -127,9 +131,9 @@ router.get('/github/callback', async (req, res) => {
       }
 
       await pool.query(
-        `INSERT INTO github_accounts (user_id, github_user_id, github_username, github_email, access_token, avatar_url, is_primary)
-         VALUES ($1, $2, $3, $4, $5, $6, false)`,
-        [targetUserId, githubId, githubUsername, primaryEmail, accessToken, avatarUrl]
+        `INSERT INTO github_accounts (user_id, github_user_id, github_username, github_email, encrypted_access_token, access_token_iv, avatar_url, is_primary)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, false)`,
+        [targetUserId, githubId, githubUsername, primaryEmail, encryptedToken, tokenIv, avatarUrl]
       );
 
       return res.redirect(`${frontendUrl}/?connected=${encodeURIComponent(githubUsername)}`);
@@ -144,9 +148,10 @@ router.get('/github/callback', async (req, res) => {
       await pool.query(
         `UPDATE users
          SET github_username = $1, name = $2, avatar_url = $3,
-             github_access_token = $4, last_login_at = NOW(), updated_at = NOW()
-         WHERE id = $5`,
-        [githubUsername, name, avatarUrl, accessToken, userId]
+             encrypted_github_access_token = $4, github_access_token_iv = $5,
+             last_login_at = NOW(), updated_at = NOW()
+         WHERE id = $6`,
+        [githubUsername, name, avatarUrl, encryptedToken, tokenIv, userId]
       );
     } else {
       const byEmail = await pool.query('SELECT id FROM users WHERE lower(email) = lower($1)', [primaryEmail]);
@@ -155,17 +160,17 @@ router.get('/github/callback', async (req, res) => {
         await pool.query(
           `UPDATE users
            SET github_user_id = $1, github_username = $2, name = $3,
-               avatar_url = $4, github_access_token = $5,
+               avatar_url = $4, encrypted_github_access_token = $5, github_access_token_iv = $6,
                last_login_at = NOW(), updated_at = NOW()
-           WHERE id = $6`,
-          [githubId, githubUsername, name, avatarUrl, accessToken, userId]
+           WHERE id = $7`,
+          [githubId, githubUsername, name, avatarUrl, encryptedToken, tokenIv, userId]
         );
       } else {
         const created = await pool.query(
-          `INSERT INTO users (email, github_user_id, github_username, name, avatar_url, github_access_token, last_login_at)
-           VALUES ($1, $2, $3, $4, $5, $6, NOW())
+          `INSERT INTO users (email, github_user_id, github_username, name, avatar_url, encrypted_github_access_token, github_access_token_iv, last_login_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
            RETURNING id`,
-          [primaryEmail, githubId, githubUsername, name, avatarUrl, accessToken]
+          [primaryEmail, githubId, githubUsername, name, avatarUrl, encryptedToken, tokenIv]
         );
         userId = created.rows[0].id;
       }
@@ -173,16 +178,17 @@ router.get('/github/callback', async (req, res) => {
 
     // Sync github_accounts: if this github_user_id exists (even as secondary), take ownership
     await pool.query(
-      `INSERT INTO github_accounts (user_id, github_user_id, github_username, github_email, access_token, avatar_url, is_primary)
-       VALUES ($1, $2, $3, $4, $5, $6, true)
+      `INSERT INTO github_accounts (user_id, github_user_id, github_username, github_email, encrypted_access_token, access_token_iv, avatar_url, is_primary)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, true)
        ON CONFLICT (github_user_id) DO UPDATE SET
-         user_id         = EXCLUDED.user_id,
-         github_username = EXCLUDED.github_username,
-         github_email    = EXCLUDED.github_email,
-         access_token    = EXCLUDED.access_token,
-         avatar_url      = EXCLUDED.avatar_url,
-         is_primary      = true`,
-      [userId, githubId, githubUsername, primaryEmail, accessToken, avatarUrl]
+         user_id                = EXCLUDED.user_id,
+         github_username        = EXCLUDED.github_username,
+         github_email           = EXCLUDED.github_email,
+         encrypted_access_token = EXCLUDED.encrypted_access_token,
+         access_token_iv        = EXCLUDED.access_token_iv,
+         avatar_url             = EXCLUDED.avatar_url,
+         is_primary             = true`,
+      [userId, githubId, githubUsername, primaryEmail, encryptedToken, tokenIv, avatarUrl]
     );
 
     // Create session

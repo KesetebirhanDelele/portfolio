@@ -1,6 +1,7 @@
 const crypto = require('crypto');
 const { execFile } = require('child_process');
 const pool = require('../db/postgres');
+const { encrypt: sharedEncrypt, decrypt: sharedDecrypt } = require('./encryption');
 
 const IMAGE = 'colaberry-live-login';
 const MAX_CONCURRENT_SESSIONS = 5;
@@ -158,18 +159,6 @@ async function teardownSession(sessionId) {
   );
 }
 
-function encrypt(plaintext, keyHex) {
-  const key = Buffer.from(keyHex, 'hex');
-  const iv = crypto.randomBytes(12);
-  const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
-  const encrypted = Buffer.concat([cipher.update(plaintext, 'utf8'), cipher.final()]);
-  const authTag = cipher.getAuthTag();
-  return {
-    payload: Buffer.concat([encrypted, authTag]).toString('base64'),
-    iv: iv.toString('base64'),
-  };
-}
-
 async function completeSession(sessionId, userId) {
   const session = sessions.get(sessionId);
   if (!session || session.userId !== userId) {
@@ -194,7 +183,7 @@ async function completeSession(sessionId, userId) {
     await teardownSession(sessionId);
   }
 
-  const { payload, iv } = encrypt(JSON.stringify(storageState), key);
+  const { payload, iv } = sharedEncrypt(JSON.stringify(storageState), key);
 
   await pool.query(
     `INSERT INTO colaberry_sessions (user_id, encrypted_storage_state, encryption_iv, captured_at, created_at, updated_at)
@@ -235,15 +224,7 @@ setInterval(() => {
 }, SWEEP_INTERVAL_MS).unref?.();
 
 function decryptStorageState(row, keyHex) {
-  const key = Buffer.from(keyHex, 'hex');
-  const iv = Buffer.from(row.encryption_iv, 'base64');
-  const combined = Buffer.from(row.encrypted_storage_state, 'base64');
-  const authTag = combined.subarray(combined.length - 16);
-  const encrypted = combined.subarray(0, combined.length - 16);
-  const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv);
-  decipher.setAuthTag(authTag);
-  const decrypted = Buffer.concat([decipher.update(encrypted), decipher.final()]);
-  return JSON.parse(decrypted.toString('utf8'));
+  return JSON.parse(sharedDecrypt(row.encrypted_storage_state, row.encryption_iv, keyHex));
 }
 
 // Run once at backend startup. If the process previously crashed or

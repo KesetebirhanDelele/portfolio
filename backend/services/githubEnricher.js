@@ -239,11 +239,15 @@ async function runWithConcurrencyLimit(tasks, limit) {
 
 // ── GitHub helpers ────────────────────────────────────────────────────────────
 
-function githubHeaders() {
+// token: the repo owner's resolved OAuth token (preferred — see
+// githubTokenResolver.js), falls back to the shared GITHUB_TOKEN env var
+// (public-repo rate-limit boost only) when no user token is available.
+function githubHeaders(token) {
+  const resolvedToken = token || process.env.GITHUB_TOKEN;
   return {
     'User-Agent': 'Repo2Reputation/1.0',
     'Accept':     'application/vnd.github.v3+json',
-    ...(process.env.GITHUB_TOKEN && { Authorization: `token ${process.env.GITHUB_TOKEN}` }),
+    ...(resolvedToken && { Authorization: `token ${resolvedToken}` }),
   };
 }
 
@@ -251,11 +255,11 @@ function githubHeaders() {
  * Resolves the default branch when the DB field is null.
  * Falls back to 'main' on any API error.
  */
-async function resolveDefaultBranch(owner, repo) {
+async function resolveDefaultBranch(owner, repo, token) {
   try {
     const { data } = await axios.get(
       `${GITHUB_API}/repos/${owner}/${repo}`,
-      { headers: githubHeaders(), timeout: FILE_TIMEOUT_MS },
+      { headers: githubHeaders(token), timeout: FILE_TIMEOUT_MS },
     );
     return data.default_branch ?? 'main';
   } catch {
@@ -269,12 +273,12 @@ async function resolveDefaultBranch(owner, repo) {
  *
  * @returns {{ entries: object[], shallow: boolean }}
  */
-async function fetchTree(owner, repo, branch) {
+async function fetchTree(owner, repo, branch, token) {
   let data;
   try {
     ({ data } = await axios.get(
       `${GITHUB_API}/repos/${owner}/${repo}/git/trees/${branch}`,
-      { headers: githubHeaders(), timeout: TREE_TIMEOUT_MS, params: { recursive: '1' } },
+      { headers: githubHeaders(token), timeout: TREE_TIMEOUT_MS, params: { recursive: '1' } },
     ));
   } catch (err) {
     if (err.response?.status === 404) {
@@ -289,7 +293,7 @@ async function fetchTree(owner, repo, branch) {
   if (data.truncated || data.tree.length > LIMITS.MAX_TREE_ENTRIES) {
     const { data: shallow } = await axios.get(
       `${GITHUB_API}/repos/${owner}/${repo}/git/trees/${branch}`,
-      { headers: githubHeaders(), timeout: TREE_TIMEOUT_MS },
+      { headers: githubHeaders(token), timeout: TREE_TIMEOUT_MS },
     );
     return { entries: shallow.tree, shallow: true };
   }
@@ -304,12 +308,12 @@ async function fetchTree(owner, repo, branch) {
  * @returns {{ content: string, truncated: boolean, originalLines: number }}
  * @throws When the file is unavailable or has unexpected encoding
  */
-async function fetchFileContent(owner, repo, filePath, branch) {
+async function fetchFileContent(owner, repo, filePath, branch, token) {
   const encodedPath = filePath.split('/').map(encodeURIComponent).join('/');
 
   const { data } = await axios.get(
     `${GITHUB_API}/repos/${owner}/${repo}/contents/${encodedPath}`,
-    { headers: githubHeaders(), timeout: FILE_TIMEOUT_MS, params: { ref: branch } },
+    { headers: githubHeaders(token), timeout: FILE_TIMEOUT_MS, params: { ref: branch } },
   );
 
   // GitHub returns content: "" for files >1 MB (they require a separate blob fetch)
@@ -327,9 +331,9 @@ async function fetchFileContent(owner, repo, filePath, branch) {
 
 // ── Core enrichment logic ─────────────────────────────────────────────────────
 
-async function _doEnrichment(repoData) {
+async function _doEnrichment(repoData, token) {
   const [owner, repo] = repoData.full_name.split('/');
-  const branch        = repoData.default_branch ?? await resolveDefaultBranch(owner, repo);
+  const branch        = repoData.default_branch ?? await resolveDefaultBranch(owner, repo, token);
 
   const softDeadline  = Date.now() + LIMITS.ENRICHMENT_TIMEOUT_MS - SOFT_DEADLINE_BUFFER;
 
@@ -338,7 +342,7 @@ async function _doEnrichment(repoData) {
   let timedOut  = false;
 
   // ── 1. File tree ──────────────────────────────────────────────────────────────
-  const { entries, shallow } = await fetchTree(owner, repo, branch);
+  const { entries, shallow } = await fetchTree(owner, repo, branch, token);
   const blobEntries = entries.filter(e => e.type === 'blob');
 
   // ── 2. Score and rank ─────────────────────────────────────────────────────────
@@ -378,7 +382,7 @@ async function _doEnrichment(repoData) {
     // Run up to FETCH_CONCURRENCY file fetches simultaneously.
     // Each task is a closure that captures its own file reference.
     const fetchResults = await runWithConcurrencyLimit(
-      candidates.map(file => () => fetchFileContent(owner, repo, file.path, branch)),
+      candidates.map(file => () => fetchFileContent(owner, repo, file.path, branch, token)),
       FETCH_CONCURRENCY,
     );
 
@@ -490,11 +494,14 @@ async function _doEnrichment(repoData) {
  *                                  contentTypeBreakdown }
  *
  * @param {object} repoData  Repository row from DB (needs at minimum: full_name)
+ * @param {string} [token]   Resolved GitHub token for the repo owner (see
+ *                           githubTokenResolver.js) — preferred over the
+ *                           shared GITHUB_TOKEN env var fallback.
  * @returns {{ data, meta, dbUpdate }}
  */
-async function enrichRepository(repoData) {
+async function enrichRepository(repoData, token) {
   try {
-    return await withEnrichmentTimeout(_doEnrichment(repoData));
+    return await withEnrichmentTimeout(_doEnrichment(repoData, token));
   } catch (err) {
     console.error('[deep-analysis][enrichRepository] Failed:', {
       repoFullName: repoData?.full_name,

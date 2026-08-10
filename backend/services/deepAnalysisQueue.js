@@ -4,54 +4,61 @@ const pool                          = require('../db/postgres');
 const { runDeepAnalysisPipeline }   = require('./deepAnalysisPipeline');
 const { enrichRepository }          = require('./githubEnricher');
 const { analyzeRepositoryIntelligence } = require('./codeIntelligence');
+const { getTokenForOwner }          = require('./githubTokenResolver');
 
 const CURRENT_ANALYSIS_VERSION = 'v2';
 const CURRENT_PIPELINE_VERSION = '2.0';
 
-// Phase implementations — mirrors deepAnalysis route; kept here as the shared source.
-const PHASE_IMPLS = {
-  enrichment: enrichRepository,
+// Phase implementations — mirrors deepAnalysis route; kept here as the shared
+// source. buildPhaseImpls(token) rebuilds this per-call so enrichment uses the
+// resolved repo owner's own OAuth token instead of a single shared fallback
+// token — see PROGRESS.md M53 for why (private-repo enrichment was silently
+// broken for every user without this).
+function buildPhaseImpls(token) {
+  return {
+    enrichment: (repoData) => enrichRepository(repoData, token),
 
-  async codeIntelligence(enrichmentData) {
-    const filesAvailable = Object.keys(enrichmentData?.fileContents ?? {}).length;
-    console.log('[deepAnalysisQueue][codeIntelligence] Starting —', {
-      filesAvailable,
-      complexity:   enrichmentData?.complexity?.complexity ?? 'unknown',
-      repoFullName: enrichmentData?.repoMeta?.fullName    ?? 'unknown',
-    });
+    async codeIntelligence(enrichmentData) {
+      const filesAvailable = Object.keys(enrichmentData?.fileContents ?? {}).length;
+      console.log('[deepAnalysisQueue][codeIntelligence] Starting —', {
+        filesAvailable,
+        complexity:   enrichmentData?.complexity?.complexity ?? 'unknown',
+        repoFullName: enrichmentData?.repoMeta?.fullName    ?? 'unknown',
+      });
 
-    const result = analyzeRepositoryIntelligence(enrichmentData);
+      const result = analyzeRepositoryIntelligence(enrichmentData);
 
-    const meta = {
-      filesAnalyzed:        result.meta.filesAnalyzed,
-      signalsExtracted:     result.meta.totalSignals,
-      frameworksDetected:   result.data.frameworks.length,
-      technologiesDetected: result.data.technologies.length,
-      confidenceScore:      result.meta.confidenceScore,
-    };
+      const meta = {
+        filesAnalyzed:        result.meta.filesAnalyzed,
+        signalsExtracted:     result.meta.totalSignals,
+        frameworksDetected:   result.data.frameworks.length,
+        technologiesDetected: result.data.technologies.length,
+        confidenceScore:      result.meta.confidenceScore,
+      };
 
-    console.log('[deepAnalysisQueue][codeIntelligence] Completed —', {
-      dominantStack:   result.data.dominantStack,
-      detectedDomains: result.data.detectedDomains,
-      ...meta,
-    });
+      console.log('[deepAnalysisQueue][codeIntelligence] Completed —', {
+        dominantStack:   result.data.dominantStack,
+        detectedDomains: result.data.detectedDomains,
+        ...meta,
+      });
 
-    return { data: result.data, meta, dbUpdate: result.dbUpdate };
-  },
+      return { data: result.data, meta, dbUpdate: result.dbUpdate };
+    },
 
-  async fileClassification() {
-    throw Object.assign(new Error('File classification phase not yet implemented'), { code: 'NOT_IMPLEMENTED' });
-  },
-  async semanticChunking() {
-    throw Object.assign(new Error('Semantic chunking phase not yet implemented'), { code: 'NOT_IMPLEMENTED' });
-  },
-  async intelligenceAgents() {
-    throw Object.assign(new Error('Intelligence agents phase not yet implemented'), { code: 'NOT_IMPLEMENTED' });
-  },
-  async inferenceEngine() {
-    throw Object.assign(new Error('Inference engine phase not yet implemented'), { code: 'NOT_IMPLEMENTED' });
-  },
-};
+    async fileClassification() {
+      throw Object.assign(new Error('File classification phase not yet implemented'), { code: 'NOT_IMPLEMENTED' });
+    },
+    async semanticChunking() {
+      throw Object.assign(new Error('Semantic chunking phase not yet implemented'), { code: 'NOT_IMPLEMENTED' });
+    },
+    async intelligenceAgents() {
+      throw Object.assign(new Error('Intelligence agents phase not yet implemented'), { code: 'NOT_IMPLEMENTED' });
+    },
+    async inferenceEngine() {
+      throw Object.assign(new Error('Inference engine phase not yet implemented'), { code: 'NOT_IMPLEMENTED' });
+    },
+  };
+}
 
 async function fetchRepo(repositoryId, userId) {
   const result = await pool.query(
@@ -90,8 +97,11 @@ async function queueDeepAnalysis(repositoryId, userId) {
 
   const analysisId = inserted.rows[0].id;
 
+  const [owner] = repoData.full_name.split('/');
+  const token = await getTokenForOwner(userId, owner).catch(() => null);
+
   setImmediate(() =>
-    runDeepAnalysisPipeline(analysisId, repoData, PHASE_IMPLS).catch(err =>
+    runDeepAnalysisPipeline(analysisId, repoData, buildPhaseImpls(token)).catch(err =>
       console.error(`[deepAnalysisQueue] pipeline error for ${analysisId}:`, err.message)
     )
   );
@@ -99,4 +109,4 @@ async function queueDeepAnalysis(repositoryId, userId) {
   return { analysisId, queued: true, status: 'queued' };
 }
 
-module.exports = { queueDeepAnalysis, PHASE_IMPLS };
+module.exports = { queueDeepAnalysis, buildPhaseImpls };

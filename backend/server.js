@@ -49,12 +49,14 @@ const server = app.listen(PORT, async () => {
   try {
     const pool = require('./db/postgres');
     const { runDeepAnalysisPipeline } = require('./services/deepAnalysisPipeline');
-    const { PHASE_IMPLS } = require('./services/deepAnalysisQueue');
+    const { buildPhaseImpls } = require('./services/deepAnalysisQueue');
+    const { getTokenForOwner } = require('./services/githubTokenResolver');
 
     const orphaned = await pool.query(
       `SELECT da.id AS analysis_id, da.repository_id,
               r.id, r.name, r.full_name, r.description, r.primary_language,
-              r.default_branch, r.topics, r.stars_count, r.forks_count, r.readme_content
+              r.default_branch, r.topics, r.stars_count, r.forks_count, r.readme_content,
+              r.user_id
        FROM deep_analyses da
        JOIN repositories r ON r.id = da.repository_id
        WHERE da.status IN ('queued', 'running')
@@ -75,11 +77,13 @@ const server = app.listen(PORT, async () => {
           stars_count: row.stars_count, forks_count: row.forks_count,
           readme_content: row.readme_content,
         };
-        setImmediate(() =>
-          runDeepAnalysisPipeline(row.analysis_id, repoData, PHASE_IMPLS).catch(err =>
+        const [owner] = row.full_name.split('/');
+        setImmediate(async () => {
+          const token = await getTokenForOwner(row.user_id, owner).catch(() => null);
+          runDeepAnalysisPipeline(row.analysis_id, repoData, buildPhaseImpls(token)).catch(err =>
             console.error(`[startup] pipeline error for ${row.analysis_id}:`, err.message)
-          )
-        );
+          );
+        });
       }
     }
   } catch (err) {

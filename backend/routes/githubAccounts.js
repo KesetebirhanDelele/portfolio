@@ -3,6 +3,7 @@ const express = require('express');
 const axios   = require('axios');
 const pool = require('../db/postgres');
 const authMiddleware = require('../middleware/authMiddleware');
+const { encryptGithubToken } = require('../services/githubTokenCrypto');
 
 const GITHUB_API = 'https://api.github.com';
 
@@ -66,10 +67,11 @@ router.post('/pat', authMiddleware, async (req, res) => {
       return res.status(409).json({ success: false, error: code });
     }
 
+    const { encryptedToken, tokenIv } = encryptGithubToken(pat.trim());
     await pool.query(
-      `INSERT INTO github_accounts (user_id, github_user_id, github_username, github_email, access_token, avatar_url, is_primary)
-       VALUES ($1, $2, $3, $4, $5, $6, false)`,
-      [userId, githubId, githubUsername, primaryEmail, pat.trim(), avatarUrl]
+      `INSERT INTO github_accounts (user_id, github_user_id, github_username, github_email, encrypted_access_token, access_token_iv, avatar_url, is_primary)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, false)`,
+      [userId, githubId, githubUsername, primaryEmail, encryptedToken, tokenIv, avatarUrl]
     );
 
     return res.status(201).json({ success: true, data: { username: githubUsername, avatarUrl } });

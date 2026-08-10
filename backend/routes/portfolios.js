@@ -7,6 +7,7 @@ const { generatePortfolioNarrative, extractLinkedInProfile, generateProjectDescr
 const { generatePortfolioPdf } = require('../services/pdfGenerator');
 const { TECH_CATEGORIES, TECH_LABELS } = require('../services/techMaps');
 const { publishPortfolioAsGithubRepo } = require('../services/githubPortfolioPublisher');
+const { decryptGithubToken } = require('../services/githubTokenCrypto');
 
 const router = express.Router();
 const upload  = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024 } });
@@ -764,10 +765,12 @@ router.post('/:id/publish-github-repo', authMiddleware, async (req, res) => {
 
   try {
     const userResult = await pool.query(
-      'SELECT github_username, github_access_token FROM users WHERE id = $1',
+      'SELECT github_username, encrypted_github_access_token, github_access_token_iv FROM users WHERE id = $1',
       [userId]
     );
-    const { github_username: owner, github_access_token: token } = userResult.rows[0] || {};
+    const userRow = userResult.rows[0] || {};
+    const owner = userRow.github_username;
+    const token = decryptGithubToken(userRow.encrypted_github_access_token, userRow.github_access_token_iv);
     if (!owner || !token) {
       return res.status(400).json({
         success: false,
