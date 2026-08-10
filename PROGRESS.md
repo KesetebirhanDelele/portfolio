@@ -1288,3 +1288,18 @@ Committed M47/M47.1 (commit `3b197d9`), then ran the deferred "npm install + boo
 **Next Actions:** User to click "Connect Colaberry" in the browser and confirm the Browse Network Projects view renders correctly (pills, search, cards, checkboxes) and that a checked network project actually imports.
 
 ---
+
+### M58 — "Select Repositories" checklist now defaults to all-selected *(2026-08-10)*
+**Session:** CC-20260809-8f3k
+
+**User asked whether checking projects in the Colaberry network browser (M57) was carrying over as a "select all" default on the portfolio-repo checklist ("Select Repositories (0 selected)").** It wasn't, and was never meant to — the two checklists are unrelated state serving different purposes: `selectedNetworkLinks` (Header.jsx) picks which Colaberry projects to *import*; `selected` (PortfolioBuilder.jsx) picks which already-analyzed repos go *into the portfolio being created*. Confirmed by reading the code rather than assuming: `selected` initializes to an empty `Set` and only auto-populates during the special first-login `autoStart` flow — the normal "My Portfolio" tab visit shown in the screenshot always starts at 0 selected, requiring every repo to be checked manually.
+
+**Changed the default**, since the user's expectation (everything analyzed should start checked, not empty) is the more natural default for this screen: a new effect in `PortfolioBuilder.jsx` auto-adds every newly-analyzed repo's id to `selected` the first time it's seen (tracked via `autoSelectedIdsRef`, a ref `Set` of ids already auto-decided), so a manual uncheck afterward isn't overwritten on the next 5s poll. Skipped entirely when `autoStart` is true, since that flow already sets its own selection and immediately creates the portfolio. Also added a manual **Select All / Clear All** toggle next to the checklist label, for after the user has made changes and wants to reset.
+
+**Validation:** `npm run build` (80 modules, succeeds); `npx eslint src/PortfolioBuilder.jsx` — 5 pre-existing issues (lines 795/885/1060/1101/1461), confirmed via `git diff --unified=0` to fall entirely outside the changed ranges (474, 634-649, 2118-2138).
+
+**Risks / Limitations:** Not click-tested in an actual browser this turn (no interactive session available) — verified by reading the effect's dependency/ref logic and confirming it can't fire during `autoStart`, not by watching it run.
+
+**Next Actions:** User to reload the "My Portfolio" tab and confirm previously-analyzed repos now show pre-checked, and that manually unchecking one survives the next poll cycle.
+
+---

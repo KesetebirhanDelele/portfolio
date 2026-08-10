@@ -471,6 +471,7 @@ function PortfolioBuilder({ onLogout, onGoToBrowse, onRepoDeleted, autoStart = f
 
   // Auto-start: tracks whether we've already kicked off auto-generation
   const autoStartedRef = useRef(false)
+  const autoSelectedIdsRef = useRef(new Set())
 
   useEffect(() => {
     loadRepos()
@@ -629,6 +630,22 @@ function PortfolioBuilder({ onLogout, onGoToBrowse, onRepoDeleted, autoStart = f
     }, 800)
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [autoStart, loading, importedRepos, repoStatusMap, portfolio, narrativeStatus])
+
+  // Default every newly-analyzed repo to selected, so the checklist below
+  // starts fully checked instead of requiring a manual re-check after a repo
+  // just finished analyzing. Tracks which repo ids have already been
+  // auto-decided so a manual uncheck isn't overwritten on the next poll.
+  useEffect(() => {
+    if (autoStart) return // autoStart already sets its own selection
+    const analyzedIds = importedRepos
+      .filter(r => ['completed', 'partial'].includes(analysisMap[r.id]?.status))
+      .map(r => r.id)
+    const newIds = analyzedIds.filter(id => !autoSelectedIdsRef.current.has(id))
+    if (newIds.length === 0) return
+    newIds.forEach(id => autoSelectedIdsRef.current.add(id))
+    setSelected(prev => new Set([...prev, ...newIds]))
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoStart, importedRepos, analysisMap])
 
   // Auto-start step 2: generate narrative once portfolio is created by auto-start
   useEffect(() => {
@@ -2098,9 +2115,27 @@ function PortfolioBuilder({ onLogout, onGoToBrowse, onRepoDeleted, autoStart = f
 
           {/* Repo checklist */}
           <div style={{ marginBottom: '20px' }}>
-            <label style={{ display: 'block', fontSize: '13px', fontWeight: 'bold', color: '#374151', marginBottom: '10px' }}>
-              Select Repositories ({selected.size} selected)
-            </label>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '10px' }}>
+              <label style={{ fontSize: '13px', fontWeight: 'bold', color: '#374151' }}>
+                Select Repositories ({selected.size} selected)
+              </label>
+              {analyzedRepos.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => setSelected(
+                    selected.size === analyzedRepos.length
+                      ? new Set()
+                      : new Set(analyzedRepos.map(r => r.id))
+                  )}
+                  style={{
+                    padding: '4px 10px', borderRadius: '6px', fontSize: '12px', fontWeight: '600',
+                    border: '1px solid #a5b4fc', background: '#eef2ff', color: '#4f46e5', cursor: 'pointer',
+                  }}
+                >
+                  {selected.size === analyzedRepos.length ? 'Clear All' : 'Select All'}
+                </button>
+              )}
+            </div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
               {analyzedRepos.map(repo => {
                 const isChecked = selected.has(repo.id)
