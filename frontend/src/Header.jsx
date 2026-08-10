@@ -93,6 +93,14 @@ function Header({ onLogout }) {
   const [colaberryLinksInput, setColaberryLinksInput] = useState('')
   const [colaberryLinksError, setColaberryLinksError] = useState('')
   const [colaberryLinksToImport, setColaberryLinksToImport] = useState([])
+  const [colaberryLinksMode, setColaberryLinksMode]   = useState('network') // 'network' | 'paste'
+  const [networkProjects, setNetworkProjects]         = useState([])
+  const [networkCategories, setNetworkCategories]     = useState([])
+  const [networkCategory, setNetworkCategory]         = useState('All')
+  const [networkSearchQuery, setNetworkSearchQuery]   = useState('')
+  const [isLoadingNetworkProjects, setIsLoadingNetworkProjects] = useState(false)
+  const [networkLoadError, setNetworkLoadError]       = useState('')
+  const [selectedNetworkLinks, setSelectedNetworkLinks] = useState([])
   const [cameFromAutoImport, setCameFromAutoImport]   = useState(false)
   const [publicImporting, setPublicImporting]         = useState(null)  // username being auto-imported
   const [privateImporting, setPrivateImporting]       = useState(null)  // username being auto-imported (private)
@@ -288,6 +296,42 @@ function Header({ onLogout }) {
     if (!res) return
     const json = await res.json()
     if (json.success) setAppInstallations(json.data || [])
+  }
+
+  // Colaberry's full network-project catalog — not scoped to this user. See
+  // PROGRESS.md M57 (restores Portfolioforge's original browse-and-select UX).
+  async function loadNetworkProjects(category) {
+    setIsLoadingNetworkProjects(true)
+    setNetworkLoadError('')
+    try {
+      const res = await authFetch(`${BASE_URL}/api/colaberry-import/network-projects?category=${encodeURIComponent(category)}`)
+      const body = res ? await res.json() : null
+      if (!body?.success) throw new Error(body?.error?.message || 'Failed to load network projects.')
+      setNetworkProjects(body.data.projects || [])
+    } catch (err) {
+      setNetworkLoadError(err.message)
+      setNetworkProjects([])
+    } finally {
+      setIsLoadingNetworkProjects(false)
+    }
+  }
+
+  async function loadNetworkCategories() {
+    try {
+      const res = await authFetch(`${BASE_URL}/api/colaberry-import/network-project-categories`)
+      const body = res ? await res.json() : null
+      if (body?.success) setNetworkCategories(body.data.categories || [])
+    } catch { /* category pill counts are supplementary — the project list still works without them */ }
+  }
+
+  function selectNetworkCategory(category) {
+    setNetworkCategory(category)
+    setNetworkSearchQuery('')
+    loadNetworkProjects(category)
+  }
+
+  function toggleNetworkLink(link) {
+    setSelectedNetworkLinks(prev => prev.includes(link) ? prev.filter(l => l !== link) : [...prev, link])
   }
 
   async function handleStopAnalysis() {
@@ -795,7 +839,17 @@ function Header({ onLogout }) {
 
                   {/* Connect Colaberry account — embedded live browser, see PROGRESS.md M48/M49 */}
                   <button
-                    onClick={() => { setColaberryLinksInput(''); setColaberryLinksError(''); setShowColaberryLinksPrompt(true) }}
+                    onClick={() => {
+                      setColaberryLinksInput('')
+                      setColaberryLinksError('')
+                      setColaberryLinksMode('network')
+                      setSelectedNetworkLinks([])
+                      setNetworkCategory('All')
+                      setNetworkSearchQuery('')
+                      setShowColaberryLinksPrompt(true)
+                      loadNetworkProjects('All')
+                      loadNetworkCategories()
+                    }}
                     className="flex items-center gap-2.5 px-3 py-2.5 rounded-xl border border-dashed border-emerald-200 bg-emerald-50/50 hover:bg-emerald-50 hover:border-emerald-300 transition text-left"
                   >
                     <div className="w-8 h-8 rounded-full bg-emerald-100 flex items-center justify-center flex-shrink-0">
@@ -819,79 +873,199 @@ function Header({ onLogout }) {
               </div>
             )}
 
-            {showColaberryLinksPrompt && (
-              <div className="fixed inset-0 bg-gray-900/60 flex items-center justify-center z-50 p-4">
-                <div className="bg-white rounded-2xl shadow-xl w-full max-w-lg overflow-hidden">
-                  <div className="px-6 py-4 border-b border-gray-100">
-                    <h3 className="text-lg font-bold text-gray-900">Which Colaberry projects?</h3>
-                    <p className="text-sm text-gray-500 mt-1">
-                      Paste specific project links to import — not limited to projects tied to your own
-                      account, any Colaberry project link you can view works. One per line, up to 10.
-                      Leave blank to auto-import your own projects instead.
-                    </p>
-                  </div>
-                  <div className="px-6 py-4">
-                    <textarea
-                      value={colaberryLinksInput}
-                      onChange={e => setColaberryLinksInput(e.target.value)}
-                      placeholder="https://app.colaberry.com/app/network/network/...&#10;https://app.colaberry.com/app/network/network/..."
-                      rows={5}
-                      className="w-full text-sm border border-gray-200 rounded-xl px-3 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-200"
-                    />
-                    {colaberryLinksError && (
-                      <p className="text-xs text-red-500 mt-2">{colaberryLinksError}</p>
-                    )}
-                  </div>
-                  <div className="px-6 py-4 border-t border-gray-100 flex items-center justify-between">
-                    <button
-                      onClick={() => setShowColaberryLinksPrompt(false)}
-                      className="px-4 py-2 rounded-xl text-sm font-semibold text-gray-600 hover:bg-gray-50 transition"
-                    >
-                      Cancel
-                    </button>
-                    <div className="flex gap-3">
+            {showColaberryLinksPrompt && (() => {
+              const visibleNetworkProjects = networkProjects.filter(p =>
+                !networkSearchQuery.trim() || p.title.toLowerCase().includes(networkSearchQuery.trim().toLowerCase())
+              )
+              const allVisibleSelected = visibleNetworkProjects.length > 0 &&
+                visibleNetworkProjects.every(p => selectedNetworkLinks.includes(p.projectLink))
+              const toggleSelectAllVisible = () => {
+                const visibleLinks = visibleNetworkProjects.map(p => p.projectLink)
+                setSelectedNetworkLinks(prev =>
+                  allVisibleSelected
+                    ? prev.filter(l => !visibleLinks.includes(l))
+                    : [...new Set([...prev, ...visibleLinks])]
+                )
+              }
+              const handleContinue = () => {
+                const pastedLinks = colaberryLinksInput.split('\n').map(l => l.trim()).filter(Boolean)
+                const combined = [...new Set([...selectedNetworkLinks, ...pastedLinks])]
+                if (combined.length === 0) {
+                  setColaberryLinksToImport([])
+                  setShowColaberryLinksPrompt(false)
+                  setShowColaberryLogin(true)
+                  return
+                }
+                if (combined.length > 10) {
+                  setColaberryLinksError(`You've selected ${combined.length} projects — up to 10 at a time. Remove ${combined.length - 10} to continue.`)
+                  return
+                }
+                const bad = combined.find(l => !l.startsWith('https://app.colaberry.com/'))
+                if (bad) {
+                  setColaberryLinksError(`Each link must start with https://app.colaberry.com/ — check: ${bad}`)
+                  return
+                }
+                setColaberryLinksError('')
+                setColaberryLinksToImport(combined)
+                setShowColaberryLinksPrompt(false)
+                setShowColaberryLogin(true)
+              }
+
+              return (
+                <div className="fixed inset-0 bg-gray-900/60 flex items-center justify-center z-50 p-4">
+                  <div className="bg-white rounded-2xl shadow-xl w-full max-w-2xl overflow-hidden flex flex-col" style={{ maxHeight: '85vh' }}>
+                    <div className="px-6 py-4 border-b border-gray-100">
+                      <div className="flex items-center justify-between">
+                        <h3 className="text-lg font-bold text-gray-900">Which Colaberry projects?</h3>
+                        {selectedNetworkLinks.length > 0 && (
+                          <span className="text-xs font-semibold text-indigo-600 bg-indigo-50 px-2.5 py-1 rounded-full">
+                            {selectedNetworkLinks.length} selected
+                          </span>
+                        )}
+                      </div>
+                      <p className="text-sm text-gray-500 mt-1">
+                        Browse Colaberry's network catalog and check the ones you want — not limited to
+                        projects tied to your own account. Or paste a specific link directly. Leave everything
+                        empty to auto-import your own projects instead.
+                      </p>
+                      <div className="flex gap-2 mt-3">
+                        <button
+                          onClick={() => setColaberryLinksMode('network')}
+                          className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition ${
+                            colaberryLinksMode === 'network' ? 'bg-indigo-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                          }`}
+                        >
+                          Browse Network Projects
+                        </button>
+                        <button
+                          onClick={() => setColaberryLinksMode('paste')}
+                          className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition ${
+                            colaberryLinksMode === 'paste' ? 'bg-indigo-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                          }`}
+                        >
+                          Paste a Link
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="px-6 py-4 overflow-y-auto flex-1">
+                      {colaberryLinksMode === 'paste' ? (
+                        <textarea
+                          value={colaberryLinksInput}
+                          onChange={e => setColaberryLinksInput(e.target.value)}
+                          placeholder="https://app.colaberry.com/app/network/network/...&#10;https://app.colaberry.com/app/network/network/..."
+                          rows={5}
+                          className="w-full text-sm border border-gray-200 rounded-xl px-3 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-200"
+                        />
+                      ) : (
+                        <>
+                          <div className="flex flex-wrap gap-2 mb-3">
+                            {['All', ...networkCategories.map(c => c.name)].map(cat => {
+                              const count = cat === 'All' ? null : networkCategories.find(c => c.name === cat)?.count
+                              return (
+                                <button
+                                  key={cat}
+                                  onClick={() => selectNetworkCategory(cat)}
+                                  className={`px-3 py-1 rounded-full text-xs font-semibold border transition ${
+                                    networkCategory === cat
+                                      ? 'bg-indigo-600 border-indigo-600 text-white'
+                                      : 'bg-white border-gray-200 text-gray-600 hover:border-gray-300'
+                                  }`}
+                                >
+                                  {cat}{count != null ? ` (${count})` : ''}
+                                </button>
+                              )
+                            })}
+                          </div>
+
+                          <div className="flex items-center gap-2 mb-3">
+                            <input
+                              type="text"
+                              value={networkSearchQuery}
+                              onChange={e => setNetworkSearchQuery(e.target.value)}
+                              placeholder="Search network projects…"
+                              className="flex-1 text-sm border border-gray-200 rounded-xl px-3 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-200"
+                            />
+                            <button
+                              onClick={toggleSelectAllVisible}
+                              disabled={visibleNetworkProjects.length === 0}
+                              className="px-3 py-2 rounded-xl text-xs font-semibold border border-indigo-200 text-indigo-600 hover:bg-indigo-50 disabled:opacity-40 disabled:cursor-not-allowed transition whitespace-nowrap"
+                            >
+                              {allVisibleSelected ? 'Clear All' : 'Select All'}
+                            </button>
+                          </div>
+
+                          {networkLoadError && (
+                            <p className="text-xs text-red-500 mb-3">{networkLoadError}</p>
+                          )}
+
+                          <div className="space-y-2">
+                            {isLoadingNetworkProjects ? (
+                              <p className="text-sm text-gray-400 text-center py-8">Loading network projects…</p>
+                            ) : visibleNetworkProjects.length === 0 ? (
+                              <p className="text-sm text-gray-400 text-center py-8">
+                                {networkSearchQuery.trim() ? 'No projects match your search.' : 'No projects found in this category.'}
+                              </p>
+                            ) : (
+                              visibleNetworkProjects.map(project => (
+                                <label
+                                  key={project.networkId}
+                                  className="flex items-center gap-3 border border-gray-100 rounded-xl px-3 py-2.5 hover:border-indigo-200 cursor-pointer transition"
+                                >
+                                  <input
+                                    type="checkbox"
+                                    checked={selectedNetworkLinks.includes(project.projectLink)}
+                                    onChange={() => toggleNetworkLink(project.projectLink)}
+                                    className="flex-shrink-0"
+                                  />
+                                  {project.imageUrl?.startsWith('http') && (
+                                    <img src={project.imageUrl} alt="" className="w-12 h-12 rounded-lg object-cover flex-shrink-0 bg-gray-100" />
+                                  )}
+                                  <div className="min-w-0">
+                                    <p className="text-sm font-semibold text-gray-900 truncate">{project.title}</p>
+                                    <p className="text-xs text-gray-500 line-clamp-2">{project.summary}</p>
+                                  </div>
+                                </label>
+                              ))
+                            )}
+                          </div>
+                        </>
+                      )}
+                      {colaberryLinksError && (
+                        <p className="text-xs text-red-500 mt-3">{colaberryLinksError}</p>
+                      )}
+                    </div>
+
+                    <div className="px-6 py-4 border-t border-gray-100 flex items-center justify-between flex-shrink-0">
                       <button
-                        onClick={() => {
-                          setColaberryLinksToImport([])
-                          setShowColaberryLinksPrompt(false)
-                          setShowColaberryLogin(true)
-                        }}
-                        className="px-4 py-2 rounded-xl text-sm font-semibold text-indigo-600 hover:bg-indigo-50 transition"
+                        onClick={() => setShowColaberryLinksPrompt(false)}
+                        className="px-4 py-2 rounded-xl text-sm font-semibold text-gray-600 hover:bg-gray-50 transition"
                       >
-                        Skip — import my own
+                        Cancel
                       </button>
-                      <button
-                        onClick={() => {
-                          const links = colaberryLinksInput.split('\n').map(l => l.trim()).filter(Boolean)
-                          if (links.length === 0) {
+                      <div className="flex gap-3">
+                        <button
+                          onClick={() => {
                             setColaberryLinksToImport([])
                             setShowColaberryLinksPrompt(false)
                             setShowColaberryLogin(true)
-                            return
-                          }
-                          if (links.length > 10) {
-                            setColaberryLinksError('You can import up to 10 project links at a time.')
-                            return
-                          }
-                          const bad = links.find(l => !l.startsWith('https://app.colaberry.com/'))
-                          if (bad) {
-                            setColaberryLinksError(`Each link must start with https://app.colaberry.com/ — check: ${bad}`)
-                            return
-                          }
-                          setColaberryLinksError('')
-                          setColaberryLinksToImport(links)
-                          setShowColaberryLinksPrompt(false)
-                          setShowColaberryLogin(true)
-                        }}
-                        className="px-5 py-2 rounded-xl text-sm font-semibold text-white bg-indigo-600 hover:bg-indigo-700 transition"
-                      >
-                        Continue
-                      </button>
+                          }}
+                          className="px-4 py-2 rounded-xl text-sm font-semibold text-indigo-600 hover:bg-indigo-50 transition"
+                        >
+                          Skip — import my own
+                        </button>
+                        <button
+                          onClick={handleContinue}
+                          className="px-5 py-2 rounded-xl text-sm font-semibold text-white bg-indigo-600 hover:bg-indigo-700 transition"
+                        >
+                          Continue
+                        </button>
+                      </div>
                     </div>
                   </div>
                 </div>
-              </div>
-            )}
+              )
+            })()}
 
             {showColaberryLogin && (
               <ColaberryLiveLogin

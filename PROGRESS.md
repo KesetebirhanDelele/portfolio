@@ -1263,3 +1263,28 @@ Committed M47/M47.1 (commit `3b197d9`), then ran the deferred "npm install + boo
 **Next Actions:** User to refresh the portfolio builder in-browser, click "↺ Retry" on a failed repo to confirm the button renders and works from the actual UI (not just the API), and confirm the Browse-GitHub view now lists repos again.
 
 ---
+
+### M57 — Restored Portfolioforge's browsable "Network Projects" catalog (checkbox UI, not just paste-a-link) *(2026-08-10)*
+**Session:** CC-20260809-8f3k
+
+**User asked whether there had been a real selection interface for Colaberry network projects** ("once logged in") beyond what M55 restored. Checked the original source under `legacy/portfolioforge-automation/` rather than assuming — M55's textarea-of-pasted-links was a real but *partial* restoration. The original had a second, primary discovery path M55 missed entirely: a full **browsable catalog UI**, independent of any specific user, backed by two endpoints (`server.js` lines 664-841) querying `dbo.ADF_Proj_Deployed` — Colaberry's full table of network-deployed projects, not scoped to "my projects." The original `App.jsx` rendered this as a "My Projects" / "Network Projects" toggle, category pill filters (Power BI / DW ETL / Qlik / Tableau, counted via keyword `LIKE` matching), a search box, a scrollable card list (title + summary + thumbnail) with checkboxes, and Select-All/Clear-All — selections fed the same `selectedProjectLinks` array ultimately submitted for import.
+
+**Restored:**
+- `services/colaberrySqlClient.js`: `getNetworkProjects(category)` and `getNetworkProjectCategories()`, ported faithfully from the original SQL (ranked/deduped by project name via `ROW_NUMBER()`, category keyword-matched against name+summary). `category` is only ever used as an object-key lookup into a fixed, code-controlled keyword map — never interpolated into SQL — so it can't be injection-bearing regardless of what a client sends.
+- `routes/colaberryImport.js`: two new `GET` routes, `/network-projects?category=X` and `/network-project-categories`, both behind `authMiddleware` (the original endpoints had no auth at all — tightened here to match this app's security posture, since everything else in this app requires login).
+- `Header.jsx`: the M55 links-prompt modal now defaults to a "Browse Network Projects" mode (category pills + search + checkbox card list, mirroring the original UX) with "Paste a Link" as a secondary mode-toggle for a link not in the catalog. Both sources merge at "Continue" (deduped, capped at 10, same `https://app.colaberry.com/` prefix check from M55) before being submitted — no change to the backend import contract itself.
+
+**Validation (live, against the real Colaberry SQL Server — not mocked):**
+- `getNetworkProjectCategories()` called directly: real counts (Power BI 47, DW ETL 2, Qlik 2, Tableau 6).
+- `getNetworkProjects('All')`: 249 real projects returned with titles, summaries, and CDN image URLs.
+- Backend restarted (new routes require a process restart, unlike the M56 migration); both new `GET` endpoints hit through the actual HTTP server with a real session-backed JWT: `200` on both, category filter (`Tableau`) correctly narrowed 249 → 6.
+- `npm run build` (80 modules, succeeds) and `npx eslint src/Header.jsx`: 2 pre-existing issues (lines 68, 508), confirmed via `git diff --unified=0` to fall entirely outside the changed ranges (95-1067ish).
+
+**Risks / Limitations:**
+- Not yet clicked through in an actual browser this session (no interactive browser available) — verified via direct HTTP calls against the live backend, which exercise the same route code the frontend calls, but the modal's rendering/layout itself is unverified visually.
+- Category keyword matching (`LIKE '%power bi%'` etc.) is a straight port of the original's simple substring approach — same false-positive/negative characteristics the original had (e.g. a summary mentioning "data warehouse" in passing would count toward "DW ETL"). Not a new limitation introduced here.
+- The two new endpoints add two more calls to the same Colaberry SQL Server pool (`getPool()`); no separate rate-limiting or caching was added — acceptable at current scale, worth revisiting if the network catalog is browsed heavily.
+
+**Next Actions:** User to click "Connect Colaberry" in the browser and confirm the Browse Network Projects view renders correctly (pills, search, cards, checkboxes) and that a checked network project actually imports.
+
+---

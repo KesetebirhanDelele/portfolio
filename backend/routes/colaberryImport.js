@@ -3,7 +3,10 @@ const express = require('express');
 const authMiddleware = require('../middleware/authMiddleware');
 const pool = require('../db/postgres');
 const sessionManager = require('../services/colaberryLiveLoginSessionManager');
-const { getColaberryUserByEmail, getProjectLinksForUser } = require('../services/colaberrySqlClient');
+const {
+  getColaberryUserByEmail, getProjectLinksForUser,
+  getNetworkProjects, getNetworkProjectCategories,
+} = require('../services/colaberrySqlClient');
 const { scrapeColaberryProjects } = require('../services/colaberryProjectScraper');
 const { queueAnalysis } = require('../services/analysisQueue');
 
@@ -160,6 +163,32 @@ router.post('/', authMiddleware, async (req, res) => {
   } catch (err) {
     console.error('[colaberry-import] error:', err.message);
     return res.status(500).json({ success: false, error: { code: 'SERVER_ERROR', message: err.message } });
+  }
+});
+
+// GET /api/colaberry-import/network-projects?category=X — Colaberry's full
+// network catalog, not scoped to the logged-in user (that's the point: it's
+// how a user discovers a project that isn't "theirs" to begin with). See
+// PROGRESS.md M57.
+router.get('/network-projects', authMiddleware, async (req, res) => {
+  try {
+    const category = String(req.query.category || 'All').trim();
+    const projects = await getNetworkProjects(category);
+    return res.status(200).json({ success: true, data: { category, projects } });
+  } catch (err) {
+    console.error('[colaberry-import] network-projects error:', err.message);
+    return res.status(500).json({ success: false, error: { code: 'SERVER_ERROR', message: 'Failed to load network projects.' } });
+  }
+});
+
+// GET /api/colaberry-import/network-project-categories — filter-pill counts
+router.get('/network-project-categories', authMiddleware, async (req, res) => {
+  try {
+    const categories = await getNetworkProjectCategories();
+    return res.status(200).json({ success: true, data: { categories } });
+  } catch (err) {
+    console.error('[colaberry-import] network-project-categories error:', err.message);
+    return res.status(500).json({ success: false, error: { code: 'SERVER_ERROR', message: 'Failed to load network project categories.' } });
   }
 });
 

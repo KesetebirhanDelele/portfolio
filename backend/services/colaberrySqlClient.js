@@ -61,4 +61,90 @@ async function getProjectLinksForUser(userId) {
   return result.recordset.map(row => row.CAP_Launch_UploadLink);
 }
 
-module.exports = { getColaberryUserByEmail, getProjectLinksForUser };
+// Keyword sets defining each network category. Values are fixed constants we
+// control (never derived from a request), so string-interpolating the
+// category name into SQL below (getNetworkProjectCategories) is safe.
+const NETWORK_CATEGORY_KEYWORDS = {
+  'Power BI': ['power bi'],
+  'DW ETL': ['dw etl', 'data warehouse', 'etl'],
+  Qlik: ['qlik'],
+  Tableau: ['tableau'],
+};
+
+function categoryConditionSql(request, keywords, paramPrefix) {
+  const conditions = keywords.map((keyword, index) => {
+    const paramName = `${paramPrefix}${index}`;
+    request.input(paramName, sql.NVarChar, `%${keyword}%`);
+    return `(LOWER(ProjectName) LIKE LOWER(@${paramName}) OR LOWER(ISNULL(ProjectSummary, '')) LIKE LOWER(@${paramName}))`;
+  });
+  return conditions.join(' OR ');
+}
+
+// Colaberry's full catalog of network-deployed projects — not tied to any
+// specific user, unlike getProjectLinksForUser above. Ported from
+// legacy/portfolioforge-automation/server.js's /api/colaberry/network-projects.
+// `category` is only ever used as an object-key lookup below, never
+// interpolated into SQL, so an unrecognized value safely falls back to no filter.
+async function getNetworkProjects(category = 'All') {
+  const pool = await getPool();
+  const request = pool.request();
+  const keywords = NETWORK_CATEGORY_KEYWORDS[category];
+  const categoryCondition = category !== 'All' && keywords
+    ? `AND (${categoryConditionSql(request, keywords, 'kw')})`
+    : '';
+
+  const result = await request.query(`
+    WITH RankedProjects AS (
+      SELECT
+        projectID, ProjectName, ProjectSummary, ProjectVisual,
+        ROW_NUMBER() OVER (
+          PARTITION BY LOWER(LTRIM(RTRIM(ProjectName)))
+          ORDER BY projectID DESC
+        ) AS rowNumber
+      FROM dbo.ADF_Proj_Deployed
+      WHERE projectID IS NOT NULL
+        AND ProjectName IS NOT NULL
+        AND LTRIM(RTRIM(ProjectName)) <> ''
+        ${categoryCondition}
+    )
+    SELECT projectID, ProjectName, ProjectSummary, ProjectVisual
+    FROM RankedProjects
+    WHERE rowNumber = 1
+    ORDER BY ProjectName
+  `);
+
+  return result.recordset.map(row => ({
+    networkId:   Number(row.projectID),
+    projectLink: `https://app.colaberry.com/app/network/network/${row.projectID}/projectinstructions`,
+    title:       row.ProjectName,
+    summary:     row.ProjectSummary || '',
+    imageUrl:    row.ProjectVisual || '',
+  }));
+}
+
+// Per-category counts for the network-projects browser's filter pills.
+async function getNetworkProjectCategories() {
+  const pool = await getPool();
+  const request = pool.request();
+
+  const categoryQueries = Object.entries(NETWORK_CATEGORY_KEYWORDS).map(([name, keywords], catIndex) => {
+    const condition = categoryConditionSql(request, keywords, `cat${catIndex}kw`);
+    return `
+      SELECT '${name.replace(/'/g, "''")}' AS CategoryName,
+             COUNT(DISTINCT LOWER(LTRIM(RTRIM(ProjectName)))) AS ProjectCount
+      FROM dbo.ADF_Proj_Deployed
+      WHERE projectID IS NOT NULL
+        AND ProjectName IS NOT NULL
+        AND LTRIM(RTRIM(ProjectName)) <> ''
+        AND (${condition})
+    `;
+  });
+
+  const result = await request.query(categoryQueries.join('\nUNION ALL\n'));
+  return result.recordset.map(row => ({ name: row.CategoryName, count: Number(row.ProjectCount) }));
+}
+
+module.exports = {
+  getColaberryUserByEmail, getProjectLinksForUser,
+  getNetworkProjects, getNetworkProjectCategories,
+};
