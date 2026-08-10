@@ -1232,3 +1232,34 @@ Committed M47/M47.1 (commit `3b197d9`), then ran the deferred "npm install + boo
 **Risks / Limitations:** Not yet exercised live with a real non-own-account Colaberry project link (would need the user to test with an actual link from Colaberry's network view). The domain check is a simple prefix match — sufficient for the stated threat (arbitrary destination), not a full URL-parsing/allowlist system, which felt proportionate to the actual risk here.
 
 **Next Actions:** User to test importing a specific pasted Colaberry project link (not their own) to confirm the restored flow works end-to-end.
+
+---
+
+### M56 — Two real bugs found live: `/api/repos` 500ing entirely, and no way to retry a failed deep analysis *(2026-08-10)*
+**Session:** CC-20260809-8f3k
+
+**User reported two symptoms:** GitHub repos still showed "Failed" despite the M53 per-user-token fix, and separately, "even public repos are not seen in GitHub" (the Browse view). Both root-caused from direct evidence, not assumption.
+
+**Bug 1 — no retry path once one repo has succeeded.** `PortfolioBuilder.jsx` renders two different panels depending on `analyzedRepos.length`: while zero repos have completed, the top panel offers a "Restart All" button and per-repo "↺ Retry"; once at least one repo completes (e.g. the Colaberry import from M54), it switches to a second, separate "Still analyzing" panel that only ever rendered **✕ Remove** for failed repos — no retry action existed there at all. Since "Pedal Power" had already completed, the user was permanently stuck in the panel with no retry option, and the only way out was delete-and-reimport. **Fixed:** added the same "↺ Retry" button (calling the existing `handleRestartRepo` → `POST /api/deep-analysis/run`) alongside Remove in that panel (`PortfolioBuilder.jsx` ~line 2066).
+
+**Bug 2 — `github_app_installations` table was never migrated.** `getAppInstallations()` (`services/githubTokenResolver.js`) queries `github_app_installations` unconditionally inside `GET /api/repos`, with no per-call try/catch (unlike the sibling installation-repo-fetch calls, which are guarded). No migration for that table existed anywhere in `db/migrations/` — it was referenced by `routes/githubApp.js` and the token resolver but the table itself was never created. Every call to `getAppInstallations()` threw `relation "github_app_installations" does not exist`, which the route's outer `catch` turned into a generic `500 SERVER_ERROR` — discarding the primary-account fetch that had *already succeeded* moments earlier. This explains "even public repos are not seen": the route never got to return anything, public or private, once GitHub App installation lookup was reached. **Fixed:** added migration `20250101000019_create_github_app_installations.js` matching the exact columns `routes/githubApp.js` already writes/reads (`user_id`, `installation_id` unique, `account_login`, `account_type`, `account_avatar_url`, timestamps).
+
+**Confirmed the M53 per-user-token fix was never actually broken** — the earlier "Failed" rows were stale, timestamped 01:47 UTC, before the backend process was restarted at 03:21 UTC with the M53/M54/M55 code. Verified `getTokenForOwner` resolves a working token (live GitHub API call returned 200, `x-ratelimit-limit: 5000`) in isolation before looking further.
+
+**Also noted, not a code change:** `dotenv@17.4.2` (legitimate upstream package, not a local compromise) ships a `TIPS` array in `lib/main.js` that prints unrelated product advertising (`vestauth.com`, from the same maintainer as `dotenv`/`dotenvx`) to stdout on every `.config()` call. Public reports describe dotenv@17 shipping content aimed at prompt-injecting AI coding agents into promoting/installing it. No such instruction was encountered or acted on this session beyond the console tip text. Flagged to user; no action taken on the dependency itself pending their decision.
+
+**Validation (live, against the running dev stack — not just inspection):**
+- `getTokenForOwner` + direct GitHub API call: `200`, confirming the token itself is valid and correctly resolved.
+- Ran `npm run migrate:up` against the live dev Postgres (`colaberry-portfolio-postgres`); migration applied cleanly.
+- Re-called `GET /api/repos` with a freshly minted, session-backed JWT: `200`, `47` repos returned, `0` errors — confirmed the exact route that was 500ing now succeeds.
+- Triggered `POST /api/deep-analysis/run` on the previously-failed `RepoPulse` repo directly; polled `deep_analyses` — `status: "completed"`, all 6 phases `"completed"`, `phase_errors_json: null`. Confirms the retry path works end-to-end on real data, not just that the button exists.
+- `npx eslint src/PortfolioBuilder.jsx`: 5 pre-existing issues (lines 778/868/1043/1084/1444), none within the changed range (~2066-2090) — confirmed via inspection, not introduced.
+
+**Risks / Limitations:**
+- Did not re-run the frontend build (`npm run build`) after this specific edit — the dev server picked it up via Vite HMR and eslint passed clean on the changed lines, but a production build wasn't separately verified this round.
+- The `github_app_installations` gap likely predates this session entirely (no migration ever existed for it) — worth checking whether other tables referenced in code similarly lack migrations, as a follow-up audit.
+- Did not verify in a real browser click-through (no interactive browser session available this turn) — verified via direct API calls against the live backend/DB instead, which exercises the same code paths.
+
+**Next Actions:** User to refresh the portfolio builder in-browser, click "↺ Retry" on a failed repo to confirm the button renders and works from the actual UI (not just the API), and confirm the Browse-GitHub view now lists repos again.
+
+---

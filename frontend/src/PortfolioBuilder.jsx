@@ -2065,6 +2065,19 @@ function PortfolioBuilder({ onLogout, onGoToBrowse, onRepoDeleted, autoStart = f
                       )}
                       {isFailed && (
                         <button
+                          onClick={() => handleRestartRepo(repo.id)}
+                          disabled={restarting === repo.id}
+                          style={{
+                            padding: '2px 8px', borderRadius: '6px', fontSize: '11px', fontWeight: '600',
+                            border: '1px solid #a5b4fc', background: '#eef2ff', color: '#4f46e5',
+                            cursor: restarting === repo.id ? 'not-allowed' : 'pointer',
+                          }}
+                        >
+                          {restarting === repo.id ? '…' : '↺ Retry'}
+                        </button>
+                      )}
+                      {isFailed && (
+                        <button
                           onClick={() => handleDeleteRepo(repo.id)}
                           disabled={deleting === repo.id}
                           style={{
