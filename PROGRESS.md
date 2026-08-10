@@ -1303,3 +1303,24 @@ Committed M47/M47.1 (commit `3b197d9`), then ran the deferred "npm install + boo
 **Next Actions:** User to reload the "My Portfolio" tab and confirm previously-analyzed repos now show pre-checked, and that manually unchecking one survives the next poll cycle.
 
 ---
+
+### M59 — Fixed duplicated project descriptions on the published portfolio page; confirmed Colaberry link-selection ordering matches the original design *(2026-08-10)*
+**Session:** CC-20260809-8f3k
+
+**User asked two things: whether the "Which Colaberry projects?" modal should appear before or after live-login, and why project descriptions on the published portfolio page looked repeated/too short.**
+
+**Login ordering — confirmed correct, no change made.** Checked the original `legacy/portfolioforge-automation/src/index.js:624-629`: it launched a real visible browser (`headless: false`) and only prompted for Colaberry login *at scrape time*, reusing a saved `colaberry-storage-state.json` session if one already existed. The network-projects catalog itself is pure SQL (`dbo.ADF_Proj_Deployed`) and never touched a live Colaberry session. So the original order was always select-first-then-login — exactly what `Header.jsx` already does (links-prompt modal → `ColaberryLiveLogin`). No change needed.
+
+**Description duplication — real bug, root-caused and fixed in `PublicPortfolio.jsx`'s `ProjectCard`.** `shortDesc` (the always-visible one-line overview, line 405) and `aiDescription` (the "Project Overview" box shown on expand) are frequently derived from the same underlying analysis field when the deep-analysis pipeline produced only one summary instead of a distinct short + long version. The component was built assuming these would always differ, so it never checked — for `cora-recap-engine` and `RepoPulse` specifically, the identical sentence rendered twice: once in the always-visible block, once again in the expanded "Project Overview" box. A second, unconditional duplicate existed for any repo with no `aiDescription` at all: the expanded-state fallback re-rendered `shortDesc` a second time even though the always-visible block above it had already shown the exact same text.
+
+**Fixed:** added `aiRepeatsOverview` / `aiHasExtraContent` checks that compare the AI description's first paragraph against the always-visible overview text. When they're identical and there's no additional paragraph beyond that one sentence, the redundant block (the collapsed-state teaser line, or the expanded "Project Overview" box) is skipped entirely — the overview shows once, not twice. Also removed the guaranteed-duplicate `shortDesc` fallback in the expanded block (unreachable now that the always-visible block already covers that case), and adjusted `hasReadMore` so the "Show more" button doesn't appear when expanding would show nothing new.
+
+**Also checked, no changes made:** "Download Resume PDF" hits a separate server-rendered endpoint (`/api/portfolios/public/:slug/pdf`), not this React component — the screenshot the user showed matches the live HTML page's markup exactly, so the PDF path wasn't in scope here and wasn't audited.
+
+**Validation:** `npm run build` (80 modules, succeeds); `npx eslint src/PublicPortfolio.jsx` — 3 pre-existing issues (lines 54, 98), confirmed via `git diff --unified=0` to fall entirely outside the changed range (410-546).
+
+**Risks / Limitations:** Not click-tested in an actual browser this turn (no interactive session available) — verified by reading the corrected render conditions, not by viewing the rendered card. The underlying cause (deep-analysis pipeline sometimes producing only one summary instead of a distinct short + long pair) wasn't addressed — this fix makes the UI tolerate that case gracefully rather than changing what the pipeline generates.
+
+**Next Actions:** User to reload the published portfolio page for `cora-recap-engine` / `RepoPulse` and confirm each project's description now appears once, and that "Show more" only appears where there's genuinely more to show.
+
+---

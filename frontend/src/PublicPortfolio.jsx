@@ -408,8 +408,18 @@ function ProjectCard({ repo, oneLiner, aiDescription }) {
     ? aiDescription.split(/\n\n+/).filter(Boolean)
     : null
 
+  // shortDesc and aiDescription frequently come from the same underlying
+  // analysis field when the pipeline only produced one summary instead of a
+  // distinct short + long version — without this check, that single sentence
+  // renders twice: once in the always-visible overview below, once again in
+  // the expanded "Project Overview" box (or its no-aiDescription fallback).
+  const aiParagraphs = aiDescription ? aiDescription.split(/\n\n+/).filter(Boolean) : []
+  const aiRepeatsOverview = !!(aiParagraphs[0] && shortDesc && aiParagraphs[0].trim() === shortDesc.trim())
+  const firstAiParagraph = aiParagraphs[0] || null
+  const aiHasExtraContent = aiDescription && !(aiRepeatsOverview && aiParagraphs.length === 1)
+
   const collapseText = shortDesc
-  const hasReadMore = aiDescription || shortDesc.length > 120
+  const hasReadMore = aiHasExtraContent || shortDesc.length > 120
   const stars = repo.stars || 0
   const forks = repo.forks || 0
 
@@ -511,36 +521,29 @@ function ProjectCard({ repo, oneLiner, aiDescription }) {
           </p>
         )}
 
-        {!expanded && aiDescription && (
+        {!expanded && aiDescription && !aiRepeatsOverview && (
           <p style={{ margin: '0 0 8px', fontSize: '12px', color: TM, lineHeight: 1.7 }}>
-            {aiDescription.split(/\n\n+/)[0]}
+            {firstAiParagraph}
           </p>
         )}
 
-        {expanded && (
+        {expanded && paragraphs && !(paragraphs.length === 1 && aiRepeatsOverview) && (
           <div style={{ marginBottom: '10px' }}>
-            {paragraphs ? (
-              <div style={{
-                padding: '12px 14px',
-                backgroundColor: '#f8faff',
-                border: `1px solid #e0e7ff`,
-                borderRadius: '8px',
-              }}>
-                <span style={{ fontSize: '10px', fontWeight: '700', color: '#4361ee', textTransform: 'uppercase', letterSpacing: '0.8px', display: 'block', marginBottom: '8px' }}>
-                  Project Overview
-                </span>
-                {paragraphs.map((para, i) => (
-                  <p key={i} style={{ margin: i > 0 ? '10px 0 0' : '0', fontSize: '12px', color: TS, lineHeight: 1.75 }}>
-                    {para}
-                  </p>
-                ))}
-              </div>
-            ) : shortDesc ? (
-              <p style={{ margin: 0, fontSize: '12px', color: TS, lineHeight: 1.7 }}>
-                {shortDesc}
-              </p>
-            ) : null}
-
+            <div style={{
+              padding: '12px 14px',
+              backgroundColor: '#f8faff',
+              border: `1px solid #e0e7ff`,
+              borderRadius: '8px',
+            }}>
+              <span style={{ fontSize: '10px', fontWeight: '700', color: '#4361ee', textTransform: 'uppercase', letterSpacing: '0.8px', display: 'block', marginBottom: '8px' }}>
+                Project Overview
+              </span>
+              {paragraphs.map((para, i) => (
+                <p key={i} style={{ margin: i > 0 ? '10px 0 0' : '0', fontSize: '12px', color: TS, lineHeight: 1.75 }}>
+                  {para}
+                </p>
+              ))}
+            </div>
           </div>
         )}
 
