@@ -104,4 +104,20 @@ async function queueAnalysis(repositoryId) {
   return { analysisId, queued: true, status: 'queued' };
 }
 
-module.exports = { processAnalyses, queueAnalysis };
+// Always queues a fresh analysis, bypassing queueAnalysis's skip-if-completed
+// check — for explicit user-triggered refreshes (e.g. after re-fetching a
+// repo's README), where re-running against updated source data is the point.
+// See PROGRESS.md M60.
+async function forceQueueAnalysis(repositoryId) {
+  const inserted = await pool.query(
+    `INSERT INTO analyses (repository_id, status, created_at)
+     VALUES ($1, 'queued', NOW()) RETURNING id`,
+    [repositoryId]
+  );
+
+  const analysisId = inserted.rows[0].id;
+  setImmediate(() => processAnalyses([analysisId]));
+  return { analysisId, queued: true, status: 'queued' };
+}
+
+module.exports = { processAnalyses, queueAnalysis, forceQueueAnalysis };

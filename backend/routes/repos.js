@@ -3,7 +3,7 @@ const axios = require('axios');
 const pool = require('../db/postgres');
 const authMiddleware = require('../middleware/authMiddleware');
 const { generateReadme } = require('../services/openai');
-const { queueAnalysis }        = require('../services/analysisQueue');
+const { queueAnalysis, forceQueueAnalysis } = require('../services/analysisQueue');
 const { queueDeepAnalysis }    = require('../services/deepAnalysisQueue');
 const { getInstallationRepos } = require('../services/githubApp');
 const { GENERATED_PORTFOLIO_TOPIC } = require('../services/githubPortfolioPublisher');
@@ -12,7 +12,6 @@ const { getGithubInfo, getGithubAccounts, getAppInstallations, getTokenForOwner 
 const router = express.Router();
 
 const GITHUB_API = 'https://api.github.com';
-const README_MAX_REPO_SIZE_KB = 5120; // skip README fetch if repo > 5 MB
 
 // Repos carrying GENERATED_PORTFOLIO_TOPIC are output this platform generated
 // (markdown/narrative), not a source project — they must never be re-imported
@@ -383,10 +382,11 @@ router.post('/import', authMiddleware, async (req, res) => {
         continue;
       }
 
-      // Fetch README only when repo is small enough to stay within rate limits
-      const readmeContent = repo.size < README_MAX_REPO_SIZE_KB
-        ? await fetchReadme(owner, repoName, ghInfo.github_access_token)
-        : null;
+      // A README fetch is one lightweight API call regardless of overall repo
+      // size (GitHub returns just the README file, not the repo tree), so
+      // there's no rate-limit reason to skip it for large repos — see
+      // PROGRESS.md M60 for the bug this size gate silently caused.
+      const readmeContent = await fetchReadme(owner, repoName, ghInfo.github_access_token);
 
       // Upsert into repositories — update on re-import
       const repoResult = await pool.query(
@@ -555,6 +555,81 @@ router.delete('/:repositoryId', authMiddleware, async (req, res) => {
   } catch (err) {
     console.error('[repos] delete error:', err.message);
     return res.status(500).json({ success: false, error: 'Failed to delete repository.' });
+  }
+});
+
+// POST /api/repos/:repositoryId/refresh — re-fetch this repo's README +
+// metadata from GitHub and re-run the basic analysis pipeline against it.
+// readme_content is only ever set at import time (fetchReadme, above) and
+// never touched again, so a repo imported before its README existed (or
+// before it was pushed) stays frozen with the "no README available" fallback
+// forever unless something explicitly re-fetches. See PROGRESS.md M60.
+router.post('/:repositoryId/refresh', authMiddleware, async (req, res) => {
+  const { id: userId } = req.user;
+  const { repositoryId } = req.params;
+
+  try {
+    const repoResult = await pool.query(
+      `SELECT id, provider, full_name FROM repositories WHERE id = $1 AND user_id = $2`,
+      [repositoryId, userId]
+    );
+    const repo = repoResult.rows[0];
+    if (!repo) {
+      return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Repository not found.' } });
+    }
+    if (repo.provider !== 'github') {
+      return res.status(400).json({
+        success: false,
+        error: { code: 'NOT_APPLICABLE', message: `Refresh is only available for GitHub repositories (this repo's source is '${repo.provider}').` },
+      });
+    }
+
+    const [owner, repoName] = repo.full_name.split('/');
+    const accessToken = await getTokenForOwner(userId, owner);
+
+    const { data: ghRepo } = await axios.get(`${GITHUB_API}/repos/${owner}/${repoName}`, {
+      headers: makeGithubHeaders(accessToken),
+    });
+
+    const readmeContent = await fetchReadme(owner, repoName, accessToken);
+
+    await pool.query(
+      `UPDATE repositories SET
+         description       = $1,
+         primary_language  = $2,
+         stars_count       = $3,
+         forks_count       = $4,
+         topics            = $5,
+         readme_content    = $6,
+         repo_updated_at   = $7,
+         updated_at        = NOW()
+       WHERE id = $8`,
+      [
+        ghRepo.description || null,
+        ghRepo.language || null,
+        ghRepo.stargazers_count,
+        ghRepo.forks_count,
+        JSON.stringify(ghRepo.topics || []),
+        readmeContent,
+        ghRepo.updated_at,
+        repositoryId,
+      ]
+    );
+
+    const { analysisId } = await forceQueueAnalysis(repositoryId);
+
+    return res.status(202).json({
+      success: true,
+      data: { analysisId, readmeFetched: readmeContent !== null },
+    });
+  } catch (err) {
+    const errorMessage = err.response?.status === 404
+      ? 'Repository not found on GitHub.'
+      : err.response?.status === 403
+      ? 'GitHub API rate limit exceeded.'
+      : err.message;
+    console.error('[repos] refresh error:', errorMessage);
+    return res.status(500).json({ success: false, error: { code: 'SERVER_ERROR', message: errorMessage } });
   }
 });
 

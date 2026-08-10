@@ -388,6 +388,7 @@ function PortfolioBuilder({ onLogout, onGoToBrowse, onRepoDeleted, autoStart = f
   const [restarting, setRestarting]       = useState(null) // repoId being restarted
   const [deletingRepo, setDeletingRepo]   = useState(null) // repoId confirm dialog
   const [deleting, setDeleting]           = useState(null) // repoId being deleted
+  const [refreshing, setRefreshing]       = useState(null) // repoId being refreshed
   const [elapsedSec, setElapsedSec]       = useState(0)
   const elapsedRef        = useRef(null)
   const scrollContainerRef = useRef(null)
@@ -540,6 +541,13 @@ function PortfolioBuilder({ onLogout, onGoToBrowse, onRepoDeleted, autoStart = f
     }, onLogout)
     await loadRepos()
     setRestarting(null)
+  }
+
+  async function handleRefreshRepo(repoId) {
+    setRefreshing(repoId)
+    await authFetch(`${BASE_URL}/api/repos/${repoId}/refresh`, { method: 'POST' }, onLogout)
+    await loadRepos()
+    setRefreshing(null)
   }
 
   async function handleDeleteRepo(repoId) {
@@ -2169,6 +2177,20 @@ function PortfolioBuilder({ onLogout, onGoToBrowse, onRepoDeleted, autoStart = f
                       <span style={{ fontSize: '11px', fontWeight: 'bold', padding: '2px 8px', borderRadius: '10px', backgroundColor: '#dcfce7', color: '#166534', border: '1px solid #86efac' }}>
                         ✓ Analyzed
                       </span>
+                      {(!repo.provider || repo.provider === 'github') && (
+                        <button
+                          onClick={() => handleRefreshRepo(repo.id)}
+                          disabled={refreshing === repo.id}
+                          title="Re-fetch this repo's README from GitHub and regenerate its description"
+                          style={{
+                            padding: '2px 8px', borderRadius: '6px', fontSize: '11px', fontWeight: '600',
+                            border: '1px solid #a5b4fc', background: '#eef2ff', color: '#4f46e5',
+                            cursor: refreshing === repo.id ? 'not-allowed' : 'pointer',
+                          }}
+                        >
+                          {refreshing === repo.id ? '…' : '↻ Refresh'}
+                        </button>
+                      )}
                       {deletingRepo === repo.id ? (
                         <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
                           <span style={{ fontSize: '11px', color: '#dc2626', fontWeight: '600' }}>Remove?</span>

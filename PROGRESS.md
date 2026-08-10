@@ -1324,3 +1324,33 @@ Committed M47/M47.1 (commit `3b197d9`), then ran the deferred "npm install + boo
 **Next Actions:** User to reload the published portfolio page for `cora-recap-engine` / `RepoPulse` and confirm each project's description now appears once, and that "Show more" only appears where there's genuinely more to show.
 
 ---
+
+### M60 — Fixed the actual root cause of "portfolio" repo's empty description; added a Refresh action *(2026-08-10)*
+**Session:** CC-20260809-8f3k
+
+**User asked what the description source is and why "portfolio" specifically got "The project does not provide any information on its functionality or intended use."** Traced it precisely rather than guessing: the basic-analysis pipeline (`analysisQueue.js` → `openai.js`) prompts `gpt-4o-mini` with repo name, GitHub `description`/topics/language, and the first 2000 chars of `repositories.readme_content`. Direct DB query confirmed `readme_content: null` for this repo, `description: null`, `topics: []` — the model's answer was an honest response to a genuinely empty prompt, not a bug in the model or the UI. Agreed with the user to build a way to re-fetch and re-analyze.
+
+**Found the real root cause while building the fix, not the one first assumed.** `readme_content` is only ever set once, at import time, via `fetchReadme()` in `routes/repos.js` — never touched again. The first hypothesis (imported before the README existed) turned out wrong: calling the new refresh endpoint against the live GitHub API still returned `readmeFetched: false`. Direct isolated testing found why — `POST /import`'s README fetch was gated behind `repo.size < README_MAX_REPO_SIZE_KB` (5120 KB / 5MB), and this repo (the merged monorepo itself) is 14 MB. The comment justified this as "to stay within rate limits," but a README fetch is a single lightweight API call regardless of overall repo size (GitHub returns just the README file, not the tree) — the guard was pure loss with no rate-limit benefit, silently starving every repo over 5MB of a description since the original import route was written.
+
+**Fixed at both the data layer and with a manual recovery path:**
+- `routes/repos.js`: removed the `README_MAX_REPO_SIZE_KB` size gate from both the original `/import` route and the new refresh route below — README is now fetched unconditionally on both paths (still safely `null` on any fetch failure via the existing `fetchReadme` try/catch).
+- New `POST /api/repos/:repositoryId/refresh` (`routes/repos.js`): re-fetches repo metadata + README from GitHub via the correct per-user token (`getTokenForOwner`, consistent with M53), updates the `repositories` row, and force-queues a fresh basic analysis.
+- New `forceQueueAnalysis()` (`services/analysisQueue.js`): existing `queueAnalysis()` intentionally skips if a completed analysis already exists (correct for auto-import, wrong for an explicit user-triggered refresh) — added a sibling that always inserts a fresh `analyses` row instead of silently returning the stale one.
+- `PortfolioBuilder.jsx`: added a "↻ Refresh" button next to "✓ Analyzed" in the repo checklist, gated to GitHub-provider repos only (Colaberry repos get their content from the scraper, not this README path).
+
+**Important caveat surfaced while tracing this, told to the user:** refreshing a repo's basic analysis does *not* automatically update an already-published portfolio page. `POST /:id/generate-project-descriptions` (`routes/portfolios.js`) does re-query the latest `analyses.summary_json` correctly, but its output gets written into `portfolios.content_json` as a snapshot — the public page reads that snapshot, not `analyses` live. So the full chain to see a refreshed description on a live page is: Refresh → the existing "Regenerate Descriptions" action (`handleGenerateDescriptions` in `PortfolioBuilder.jsx`, pre-existing) → republish if already public. Only the first step was built this session; the other two already existed.
+
+**Validation (live, against the real running backend and real GitHub API — not mocked):**
+- Isolated test proved `fetchReadme` itself was fine (200, 27141 chars) and pinpointed the actual gate: `repo size (KB): 14016` vs. the 5120 threshold.
+- After removing the gate and restarting the backend: `POST /api/repos/b86bca6d-.../refresh` → `202`, `readmeFetched: true`.
+- Polled the resulting `analyses` row directly: `status: "completed"`, real `what_it_does` ("This project analyzes GitHub repositories to generate professional portfolios...") sourced from the actual README content — confirmed the fix works end-to-end, not just that the request succeeded.
+- `npm run build` (80 modules, succeeds); `npx eslint src/PortfolioBuilder.jsx` — 5 pre-existing issues (lines 803/893/1068/1109/1469), confirmed via `git diff --unified=0` to fall entirely outside the changed ranges (391, 546-552, 2180-2193).
+
+**Risks / Limitations:**
+- Removing the size gate means every import/refresh now always makes a README API call regardless of repo size — one extra lightweight GitHub API call per repo, negligible against the 5000/hr authenticated rate limit already confirmed in M56.
+- The refresh button only re-runs the *basic* analysis pipeline (what feeds published-page descriptions); it does not re-run deep analysis, which already fetches its own enrichment content live on every run and was never affected by this bug.
+- Not click-tested in an actual browser this turn — verified via direct HTTP calls against the live backend, exercising the same route code the frontend calls.
+
+**Next Actions:** User to click "↻ Refresh" on the "portfolio" repo in the browser, then use the existing "Regenerate Descriptions" action and republish to confirm the real description actually reaches the live page.
+
+---
