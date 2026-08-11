@@ -1,4 +1,6 @@
 require('dotenv').config();
+const { initErrorTracking, setupExpressErrorHandler } = require('./services/errorTracking');
+initErrorTracking(); // as early as possible, per Sentry's own setup guidance — no-op if SENTRY_DSN unset
 require('./db/postgres');
 const express = require('express');
 const cors = require('cors');
@@ -13,6 +15,7 @@ const portfoliosRouter      = require('./routes/portfolios');
 const searchRouter          = require('./routes/search');
 const colaberryLiveLoginRouter = require('./routes/colaberryLiveLogin');
 const colaberryImportRouter = require('./routes/colaberryImport');
+const adminRouter           = require('./routes/admin');
 const { attachWsProxy }     = require('./services/colaberryLiveLoginWsProxy');
 const { cleanupOrphanedContainers } = require('./services/colaberryLiveLoginSessionManager');
 
@@ -33,10 +36,15 @@ app.use('/api/portfolios', portfoliosRouter);
 app.use('/api/search',     searchRouter);
 app.use('/api/colaberry-login', colaberryLiveLoginRouter);
 app.use('/api/colaberry-import', colaberryImportRouter);
+app.use('/api/admin',            adminRouter);
 
 app.get('/', (req, res) => {
   res.send('Backend is running');
 });
+
+// Must come after all routes, before any other error middleware — forwards
+// unhandled request errors to Sentry. No-op if SENTRY_DSN isn't set.
+setupExpressErrorHandler(app);
 
 const server = app.listen(PORT, async () => {
   console.log(`Server running on http://localhost:${PORT}`);
@@ -48,9 +56,12 @@ const server = app.listen(PORT, async () => {
   // Resume any analyses that were queued/running when the server last stopped
   try {
     const pool = require('./db/postgres');
-    const { runDeepAnalysisPipeline } = require('./services/deepAnalysisPipeline');
-    const { buildPhaseImpls } = require('./services/deepAnalysisQueue');
-    const { getTokenForOwner } = require('./services/githubTokenResolver');
+    // deepAnalysisQueue.js registers the 'deep-analysis-pipeline' heavy-task
+    // handler as a side effect of being required — importing it here (even
+    // though only enqueueHeavyTask is used directly) ensures that handler
+    // exists before any orphaned job is enqueued below.
+    require('./services/deepAnalysisQueue');
+    const { enqueueHeavyTask } = require('./services/heavyTaskQueue');
 
     const orphaned = await pool.query(
       `SELECT da.id AS analysis_id, da.repository_id,
@@ -78,12 +89,12 @@ const server = app.listen(PORT, async () => {
           readme_content: row.readme_content,
         };
         const [owner] = row.full_name.split('/');
-        setImmediate(async () => {
-          const token = await getTokenForOwner(row.user_id, owner).catch(() => null);
-          runDeepAnalysisPipeline(row.analysis_id, repoData, buildPhaseImpls(token)).catch(err =>
-            console.error(`[startup] pipeline error for ${row.analysis_id}:`, err.message)
-          );
-        });
+        // Same heavy-task queue as a normal deep-analysis trigger (Tier 2) —
+        // previously this fired every orphaned analysis via setImmediate
+        // simultaneously, so a restart with several queued/running rows
+        // would launch that many pipelines (each several OpenAI calls) at
+        // once with no cap at all.
+        await enqueueHeavyTask('deep-analysis-pipeline', { analysisId: row.analysis_id, repoData, userId: row.user_id, owner });
       }
     }
   } catch (err) {

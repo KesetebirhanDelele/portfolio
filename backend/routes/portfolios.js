@@ -3,6 +3,7 @@ const multer    = require('multer');
 const pdfjsLib  = require('pdfjs-dist/legacy/build/pdf.js');
 const pool = require('../db/postgres');
 const authMiddleware = require('../middleware/authMiddleware');
+const { generationLimiter } = require('../middleware/rateLimiter');
 const { generatePortfolioNarrative, extractLinkedInProfile, generateProjectDescription, generateProjectCaseStudy, CASE_STUDY_PROMPT_VERSION } = require('../services/openai');
 const { generatePortfolioPdf } = require('../services/pdfGenerator');
 const { TECH_CATEGORIES, TECH_LABELS } = require('../services/techMaps');
@@ -466,7 +467,7 @@ router.get('/:id', authMiddleware, async (req, res) => {
 });
 
 // POST /api/portfolios/:id/generate-narrative — trigger AI narrative generation
-router.post('/:id/generate-narrative', authMiddleware, async (req, res) => {
+router.post('/:id/generate-narrative', authMiddleware, generationLimiter, async (req, res) => {
   const { id: userId } = req.user;
   const { id } = req.params;
 
@@ -772,7 +773,7 @@ router.patch('/:id/publish', authMiddleware, async (req, res) => {
 // has `repo` scope), never Portfolioforge's separate/retired OAuth flow.
 // Idempotent: re-running with the same repoName upserts the same repo/files
 // rather than creating a duplicate.
-router.post('/:id/publish-github-repo', authMiddleware, async (req, res) => {
+router.post('/:id/publish-github-repo', authMiddleware, generationLimiter, async (req, res) => {
   const { id: userId } = req.user;
   const { id } = req.params;
   const { repoName } = req.body;
@@ -914,7 +915,7 @@ router.post('/:id/publish-github-repo', authMiddleware, async (req, res) => {
 
 // POST /api/portfolios/:id/generate-project-descriptions
 // Generates rich 2-4 paragraph descriptions from deep analysis data for each repo in the portfolio.
-router.post('/:id/generate-project-descriptions', authMiddleware, async (req, res) => {
+router.post('/:id/generate-project-descriptions', authMiddleware, generationLimiter, async (req, res) => {
   const { id: userId } = req.user;
   const { id } = req.params;
 
@@ -1016,7 +1017,7 @@ router.delete('/resume-data', authMiddleware, async (req, res) => {
 });
 
 // POST /api/portfolios/extract-linkedin — upload PDF, extract profile fields, return JSON (no DB save)
-router.post('/extract-linkedin', authMiddleware, upload.single('pdf'), async (req, res) => {
+router.post('/extract-linkedin', authMiddleware, generationLimiter, upload.single('pdf'), async (req, res) => {
   if (!req.file) {
     return res.status(400).json({ success: false, error: { code: 'NO_FILE', message: 'No PDF file uploaded.' } });
   }
@@ -1046,7 +1047,7 @@ router.post('/extract-linkedin', authMiddleware, upload.single('pdf'), async (re
 });
 
 // POST /api/portfolios/:id/linkedin-pdf — upload LinkedIn PDF, extract and store experience
-router.post('/:id/linkedin-pdf', authMiddleware, upload.single('pdf'), async (req, res) => {
+router.post('/:id/linkedin-pdf', authMiddleware, generationLimiter, upload.single('pdf'), async (req, res) => {
   const { id: userId } = req.user;
   const { id } = req.params;
 

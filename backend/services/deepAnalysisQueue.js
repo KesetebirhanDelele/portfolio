@@ -5,6 +5,7 @@ const { runDeepAnalysisPipeline }   = require('./deepAnalysisPipeline');
 const { enrichRepository }          = require('./githubEnricher');
 const { analyzeRepositoryIntelligence } = require('./codeIntelligence');
 const { getTokenForOwner }          = require('./githubTokenResolver');
+const { registerHeavyTaskHandler, enqueueHeavyTask } = require('./heavyTaskQueue');
 
 const CURRENT_ANALYSIS_VERSION = 'v2';
 const CURRENT_PIPELINE_VERSION = '2.0';
@@ -98,17 +99,23 @@ async function queueDeepAnalysis(repositoryId, userId) {
   );
 
   const analysisId = inserted.rows[0].id;
-
   const [owner] = repoData.full_name.split('/');
-  const token = await getTokenForOwner(userId, owner).catch(() => null);
 
-  setImmediate(() =>
-    runDeepAnalysisPipeline(analysisId, repoData, buildPhaseImpls(token)).catch(err =>
-      console.error(`[deepAnalysisQueue] pipeline error for ${analysisId}:`, err.message)
-    )
-  );
+  // Routed through the heavy-task queue (Tier 2) instead of a bare
+  // setImmediate — caps how many deep-analysis pipelines (each several
+  // OpenAI calls) run at once. Not awaited: this function's own contract
+  // is "returns immediately, runs in background, client polls status" —
+  // that's unchanged, only the concurrency of the background part is new.
+  // Job data carries userId/owner, not the resolved token — the token is a
+  // secret and gets re-resolved inside the handler (see heavyTaskQueue.js).
+  await enqueueHeavyTask('deep-analysis-pipeline', { analysisId, repoData, userId, owner });
 
   return { analysisId, queued: true, status: 'queued' };
 }
+
+registerHeavyTaskHandler('deep-analysis-pipeline', async ({ analysisId, repoData, userId, owner }) => {
+  const token = await getTokenForOwner(userId, owner).catch(() => null);
+  return runDeepAnalysisPipeline(analysisId, repoData, buildPhaseImpls(token));
+});
 
 module.exports = { queueDeepAnalysis, buildPhaseImpls };

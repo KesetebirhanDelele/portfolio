@@ -3,6 +3,7 @@
 const express = require('express');
 const pool = require('../db/postgres');
 const authMiddleware = require('../middleware/authMiddleware');
+const { heavyOperationLimiter } = require('../middleware/rateLimiter');
 const { runDeepAnalysisPipeline, retryFailedPhases } = require('../services/deepAnalysisPipeline');
 const { enrichRepository } = require('../services/githubEnricher');
 const { analyzeRepositoryIntelligence } = require('../services/codeIntelligence');
@@ -129,7 +130,7 @@ function rejectNonGithubProvider(repoData, res) {
 // Queue an analysis for a repository. Returns immediately; runs in background.
 // Deduplicates against any in-progress (queued/running) analyses.
 
-router.post('/run', authMiddleware, async (req, res) => {
+router.post('/run', authMiddleware, heavyOperationLimiter, async (req, res) => {
   const { id: userId } = req.user;
   const { repositoryId } = req.body;
 
@@ -245,7 +246,7 @@ router.post('/cancel-pending', authMiddleware, async (req, res) => {
 // Note: selective execution is not yet implemented. All modes run the full
 // pipeline. The mode is stored in analysis_metadata_json for future use.
 
-router.post('/:repoId/reanalyze', authMiddleware, async (req, res) => {
+router.post('/:repoId/reanalyze', authMiddleware, heavyOperationLimiter, async (req, res) => {
   const { id: userId } = req.user;
   const { repoId }     = req.params;
   const { reanalyzeMode = 'full' } = req.body;
@@ -615,7 +616,7 @@ router.get('/:analysisId', authMiddleware, async (req, res) => {
 // ── POST /api/deep-analysis/:analysisId/retry ─────────────────────────────────
 // Re-run failed retryable phases in-place, preserving all completed phase outputs.
 
-router.post('/:analysisId/retry', authMiddleware, async (req, res) => {
+router.post('/:analysisId/retry', authMiddleware, heavyOperationLimiter, async (req, res) => {
   const { id: userId } = req.user;
   const { analysisId } = req.params;
 

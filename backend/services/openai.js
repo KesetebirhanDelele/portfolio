@@ -1,6 +1,9 @@
 const OpenAI = require('openai');
 
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+// Explicit timeout (observability Tier 1) — previously unset, so a hung
+// OpenAI request had no bound short of the SDK's own 10-minute default,
+// well past anything a request handler should be allowed to block on.
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY, timeout: 30000, maxRetries: 2 });
 
 const SYSTEM_PROMPT = `You are a technical skill analyzer for a developer portfolio platform.
 Analyze the provided GitHub repository metadata and extract technologies, key takeaways, and a professional summary.

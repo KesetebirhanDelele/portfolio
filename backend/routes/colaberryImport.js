@@ -1,6 +1,7 @@
 const crypto = require('crypto');
 const express = require('express');
 const authMiddleware = require('../middleware/authMiddleware');
+const { heavyOperationLimiter } = require('../middleware/rateLimiter');
 const pool = require('../db/postgres');
 const sessionManager = require('../services/colaberryLiveLoginSessionManager');
 const {
@@ -9,6 +10,7 @@ const {
 } = require('../services/colaberrySqlClient');
 const { scrapeColaberryProjects } = require('../services/colaberryProjectScraper');
 const { queueAnalysis } = require('../services/analysisQueue');
+const { registerHeavyTaskHandler, runHeavyTask } = require('../services/heavyTaskQueue');
 
 const router = express.Router();
 
@@ -44,6 +46,39 @@ function buildReadmeContent(project) {
   return [project.stepByStepContent, ...stepSections].join('\n\n').slice(0, 100000);
 }
 
+// Fetches + decrypts the user's stored Colaberry session. Kept as its own
+// function (rather than inline) so both the route's early validation and
+// the queue handler below can call it independently — the decrypted
+// storageState itself must never cross the Redis job-data boundary (see
+// heavyTaskQueue.js's header comment), so the handler re-derives it fresh
+// in-process instead of receiving it as job data.
+async function getDecryptedColaberrySession(userId) {
+  const sessionRow = await pool.query(
+    'SELECT encrypted_storage_state, encryption_iv FROM colaberry_sessions WHERE user_id = $1',
+    [userId]
+  );
+  if (!sessionRow.rows[0]) {
+    const err = new Error('Connect your Colaberry account first.');
+    err.code = 'NOT_CONNECTED';
+    throw err;
+  }
+  const encKey = process.env.COLABERRY_SESSION_ENCRYPTION_KEY;
+  if (!encKey) {
+    const err = new Error('COLABERRY_SESSION_ENCRYPTION_KEY is not configured.');
+    err.code = 'NOT_CONFIGURED';
+    throw err;
+  }
+  return sessionManager.decryptStorageState(sessionRow.rows[0], encKey);
+}
+
+// Job data is { userId, projectLinks } only — no secrets. Concurrency for
+// this handler (how many Playwright browsers can run at once) is enforced
+// by heavyTaskQueue.js's worker, not here.
+registerHeavyTaskHandler('colaberry-scrape', async ({ userId, projectLinks }) => {
+  const storageState = await getDecryptedColaberrySession(userId);
+  return scrapeColaberryProjects(storageState, projectLinks);
+});
+
 // POST /api/colaberry-import — import Colaberry projects alongside the
 // user's GitHub repos, provider='colaberry'. Never touches deep_analyses —
 // these aren't source code, so they go through the basic analysis pipeline
@@ -56,7 +91,7 @@ function buildReadmeContent(project) {
 // actually view is the real boundary, same as Colaberry's own access
 // control). When omitted, falls back to auto-discovering the logged-in
 // user's own projects via SQL (the M51 behavior). See PROGRESS.md M55.
-router.post('/', authMiddleware, async (req, res) => {
+router.post('/', authMiddleware, heavyOperationLimiter, async (req, res) => {
   const { id: userId } = req.user;
   const { projectLinks: manualLinks } = req.body || {};
 
@@ -68,22 +103,16 @@ router.post('/', authMiddleware, async (req, res) => {
   }
 
   try {
-    const sessionRow = await pool.query(
-      'SELECT encrypted_storage_state, encryption_iv FROM colaberry_sessions WHERE user_id = $1',
-      [userId]
-    );
-    if (!sessionRow.rows[0]) {
-      return res.status(400).json({
-        success: false,
-        error: { code: 'NOT_CONNECTED', message: 'Connect your Colaberry account first.' },
-      });
+    // Fail fast before resolving project links / enqueuing anything — the
+    // decrypted result itself is discarded here; the queue handler
+    // re-derives it fresh in-process rather than receiving it as job data
+    // (see getDecryptedColaberrySession's comment).
+    try {
+      await getDecryptedColaberrySession(userId);
+    } catch (sessionErr) {
+      const status = sessionErr.code === 'NOT_CONFIGURED' ? 500 : 400;
+      return res.status(status).json({ success: false, error: { code: sessionErr.code || 'SERVER_ERROR', message: sessionErr.message } });
     }
-
-    const encKey = process.env.COLABERRY_SESSION_ENCRYPTION_KEY;
-    if (!encKey) {
-      return res.status(500).json({ success: false, error: { code: 'NOT_CONFIGURED', message: 'COLABERRY_SESSION_ENCRYPTION_KEY is not configured.' } });
-    }
-    const storageState = sessionManager.decryptStorageState(sessionRow.rows[0], encKey);
 
     let projectLinks;
     if (Array.isArray(manualLinks) && manualLinks.length > 0) {
@@ -107,7 +136,11 @@ router.post('/', authMiddleware, async (req, res) => {
       }
     }
 
-    const { succeeded, failed: scrapeFailed } = await scrapeColaberryProjects(storageState, projectLinks);
+    // Routed through the heavy-task queue (Tier 2) so concurrent import
+    // requests don't launch unbounded Playwright browsers on the host —
+    // see heavyTaskQueue.js. Same result shape as calling
+    // scrapeColaberryProjects directly; this request just waits its turn.
+    const { succeeded, failed: scrapeFailed } = await runHeavyTask('colaberry-scrape', { userId, projectLinks });
 
     // extractProjectImage() (colaberryProjectScraper.js) reads the image from
     // a specific DOM element on the project page and can come back empty

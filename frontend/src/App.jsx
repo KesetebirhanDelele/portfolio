@@ -5,6 +5,7 @@ import AuthCallback from './AuthCallback'
 import PublicPortfolio from './PublicPortfolio'
 import RecruiterSearch from './RecruiterSearch'
 import Settings from './Settings'
+import AdminStats from './AdminStats'
 import { BASE_URL } from './api'
 
 function App() {
@@ -60,6 +61,10 @@ function App() {
 
   if (path === '/settings') {
     return <Settings onLogout={handleLogout} />
+  }
+
+  if (path === '/admin') {
+    return <AdminStats onLogout={handleLogout} />
   }
 
   return <Header onLogout={handleLogout} />

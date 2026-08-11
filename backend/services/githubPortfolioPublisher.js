@@ -21,7 +21,10 @@
 // README generation (shields.io skill badges, two-column project cards with
 // an image + summary) — the original plain bullet-list output looked nothing
 // like Kalkidan's version and read as a raw data dump, not a portfolio.
-const axios = require('axios');
+// Explicit timeout (observability Tier 1) — plain axios has no timeout by
+// default, so a hung GitHub API call previously blocked the request handler
+// indefinitely instead of failing loud.
+const axios = require('axios').create({ timeout: 30000 });
 
 const GITHUB_API = 'https://api.github.com';
 const GENERATED_PORTFOLIO_TOPIC = 'repo2reputation-generated';
