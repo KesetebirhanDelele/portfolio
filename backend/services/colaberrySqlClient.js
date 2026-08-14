@@ -61,90 +61,52 @@ async function getProjectLinksForUser(userId) {
   return result.recordset.map(row => row.CAP_Launch_UploadLink);
 }
 
-// Keyword sets defining each network category. Values are fixed constants we
-// control (never derived from a request), so string-interpolating the
-// category name into SQL below (getNetworkProjectCategories) is safe.
-const NETWORK_CATEGORY_KEYWORDS = {
-  'Power BI': ['power bi'],
-  'DW ETL': ['dw etl', 'data warehouse', 'etl'],
-  Qlik: ['qlik'],
-  Tableau: ['tableau'],
-};
-
-function categoryConditionSql(request, keywords, paramPrefix) {
-  const conditions = keywords.map((keyword, index) => {
-    const paramName = `${paramPrefix}${index}`;
-    request.input(paramName, sql.NVarChar, `%${keyword}%`);
-    return `(LOWER(ProjectName) LIKE LOWER(@${paramName}) OR LOWER(ISNULL(ProjectSummary, '')) LIKE LOWER(@${paramName}))`;
-  });
-  return conditions.join(' OR ');
-}
-
 // Colaberry's full catalog of network-deployed projects — not tied to any
 // specific user, unlike getProjectLinksForUser above. Ported from
-// legacy/portfolioforge-automation/server.js's /api/colaberry/network-projects.
-// `category` is only ever used as an object-key lookup below, never
-// interpolated into SQL, so an unrecognized value safely falls back to no filter.
-async function getNetworkProjects(category = 'All') {
+// legacy/portfolioforge-automation/server.js's /api/colaberry/network-projects,
+// then upgraded to match Kalkidan2129/Portfolioforge-automation's later
+// version: that build reads from dbo.vw_ADF_Proj_Deployed_WithTags (a view
+// joining in Colaberry's real per-project tag metadata) with no server-side
+// category filter, and lets the UI search across the real tags instead of a
+// handful of hardcoded keyword buckets. The old 4-category LIKE filter
+// (Power BI/DW ETL/Qlik/Tableau only) silently hid every project whose name
+// or summary didn't literally contain one of those strings — confirmed live
+// on 2026-08-14: it surfaced 54 of the catalog's 250 projects. The view
+// query returns the same 250 (verified: same row/dedup counts as the base
+// table), just enriched with tags, so nothing is filtered out server-side.
+async function getNetworkProjects() {
   const pool = await getPool();
-  const request = pool.request();
-  const keywords = NETWORK_CATEGORY_KEYWORDS[category];
-  const categoryCondition = category !== 'All' && keywords
-    ? `AND (${categoryConditionSql(request, keywords, 'kw')})`
-    : '';
-
-  const result = await request.query(`
+  const result = await pool.request().query(`
     WITH RankedProjects AS (
       SELECT
-        projectID, ProjectName, ProjectSummary, ProjectVisual,
+        projectID, ProjectName, ProjectSummary, ProjectVisual, TagNames, TagCategories,
         ROW_NUMBER() OVER (
           PARTITION BY LOWER(LTRIM(RTRIM(ProjectName)))
           ORDER BY projectID DESC
         ) AS rowNumber
-      FROM dbo.ADF_Proj_Deployed
+      FROM dbo.vw_ADF_Proj_Deployed_WithTags
       WHERE projectID IS NOT NULL
         AND ProjectName IS NOT NULL
         AND LTRIM(RTRIM(ProjectName)) <> ''
-        ${categoryCondition}
     )
-    SELECT projectID, ProjectName, ProjectSummary, ProjectVisual
+    SELECT projectID, ProjectName, ProjectSummary, ProjectVisual, TagNames, TagCategories
     FROM RankedProjects
     WHERE rowNumber = 1
     ORDER BY ProjectName
   `);
 
   return result.recordset.map(row => ({
-    networkId:   Number(row.projectID),
-    projectLink: `https://app.colaberry.com/app/network/network/${row.projectID}/projectinstructions`,
-    title:       row.ProjectName,
-    summary:     row.ProjectSummary || '',
-    imageUrl:    row.ProjectVisual || '',
+    networkId:     Number(row.projectID),
+    projectLink:   `https://app.colaberry.com/app/network/network/${row.projectID}/projectinstructions`,
+    title:         row.ProjectName,
+    summary:       row.ProjectSummary || '',
+    imageUrl:      row.ProjectVisual || '',
+    tags:          row.TagNames || '',
+    tagCategories: row.TagCategories || '',
   }));
-}
-
-// Per-category counts for the network-projects browser's filter pills.
-async function getNetworkProjectCategories() {
-  const pool = await getPool();
-  const request = pool.request();
-
-  const categoryQueries = Object.entries(NETWORK_CATEGORY_KEYWORDS).map(([name, keywords], catIndex) => {
-    const condition = categoryConditionSql(request, keywords, `cat${catIndex}kw`);
-    return `
-      SELECT '${name.replace(/'/g, "''")}' AS CategoryName,
-             COUNT(DISTINCT LOWER(LTRIM(RTRIM(ProjectName)))) AS ProjectCount
-      FROM dbo.ADF_Proj_Deployed
-      WHERE projectID IS NOT NULL
-        AND ProjectName IS NOT NULL
-        AND LTRIM(RTRIM(ProjectName)) <> ''
-        AND (${condition})
-    `;
-  });
-
-  const result = await request.query(categoryQueries.join('\nUNION ALL\n'));
-  return result.recordset.map(row => ({ name: row.CategoryName, count: Number(row.ProjectCount) }));
 }
 
 module.exports = {
   getColaberryUserByEmail, getProjectLinksForUser,
-  getNetworkProjects, getNetworkProjectCategories,
+  getNetworkProjects,
 };
