@@ -6,7 +6,7 @@ const pool = require('../db/postgres');
 const sessionManager = require('../services/colaberryLiveLoginSessionManager');
 const {
   getColaberryUserByEmail, getProjectLinksForUser,
-  getNetworkProjects, getNetworkProjectCategories,
+  getNetworkProjects,
 } = require('../services/colaberrySqlClient');
 const { scrapeColaberryProjects } = require('../services/colaberryProjectScraper');
 const { queueAnalysis } = require('../services/analysisQueue');
@@ -151,7 +151,7 @@ router.post('/', authMiddleware, heavyOperationLimiter, async (req, res) => {
     // doesn't leave a project with no image at all.
     if (succeeded.some(p => !p.imageUrl)) {
       try {
-        const catalog = await getNetworkProjects('All');
+        const catalog = await getNetworkProjects();
         const catalogById = new Map(catalog.map(p => [p.networkId, p.imageUrl]));
         for (const project of succeeded) {
           if (project.imageUrl) continue;
@@ -225,29 +225,20 @@ router.post('/', authMiddleware, heavyOperationLimiter, async (req, res) => {
   }
 });
 
-// GET /api/colaberry-import/network-projects?category=X — Colaberry's full
-// network catalog, not scoped to the logged-in user (that's the point: it's
-// how a user discovers a project that isn't "theirs" to begin with). See
-// PROGRESS.md M57.
+// GET /api/colaberry-import/network-projects — Colaberry's full network
+// catalog, not scoped to the logged-in user (that's the point: it's how a
+// user discovers a project that isn't "theirs" to begin with). See
+// PROGRESS.md M57. Previously accepted ?category= against a 4-bucket
+// keyword filter; now returns the full catalog with real tag metadata and
+// lets the client search across it — see colaberrySqlClient.js's
+// getNetworkProjects for why.
 router.get('/network-projects', authMiddleware, async (req, res) => {
   try {
-    const category = String(req.query.category || 'All').trim();
-    const projects = await getNetworkProjects(category);
-    return res.status(200).json({ success: true, data: { category, projects } });
+    const projects = await getNetworkProjects();
+    return res.status(200).json({ success: true, data: { projects } });
   } catch (err) {
     console.error('[colaberry-import] network-projects error:', err.message);
     return res.status(500).json({ success: false, error: { code: 'SERVER_ERROR', message: 'Failed to load network projects.' } });
-  }
-});
-
-// GET /api/colaberry-import/network-project-categories — filter-pill counts
-router.get('/network-project-categories', authMiddleware, async (req, res) => {
-  try {
-    const categories = await getNetworkProjectCategories();
-    return res.status(200).json({ success: true, data: { categories } });
-  } catch (err) {
-    console.error('[colaberry-import] network-project-categories error:', err.message);
-    return res.status(500).json({ success: false, error: { code: 'SERVER_ERROR', message: 'Failed to load network project categories.' } });
   }
 });
 

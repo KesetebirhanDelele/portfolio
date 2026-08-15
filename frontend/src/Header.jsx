@@ -95,9 +95,8 @@ function Header({ onLogout }) {
   const [colaberryLinksToImport, setColaberryLinksToImport] = useState([])
   const [colaberryLinksMode, setColaberryLinksMode]   = useState('network') // 'network' | 'paste'
   const [networkProjects, setNetworkProjects]         = useState([])
-  const [networkCategories, setNetworkCategories]     = useState([])
-  const [networkCategory, setNetworkCategory]         = useState('All')
   const [networkSearchQuery, setNetworkSearchQuery]   = useState('')
+  const [networkTagSearchQuery, setNetworkTagSearchQuery] = useState('')
   const [isLoadingNetworkProjects, setIsLoadingNetworkProjects] = useState(false)
   const [networkLoadError, setNetworkLoadError]       = useState('')
   const [selectedNetworkLinks, setSelectedNetworkLinks] = useState([])
@@ -300,11 +299,14 @@ function Header({ onLogout }) {
 
   // Colaberry's full network-project catalog — not scoped to this user. See
   // PROGRESS.md M57 (restores Portfolioforge's original browse-and-select UX).
-  async function loadNetworkProjects(category) {
+  // Returns the whole catalog with real tag metadata (no server-side
+  // category filter — see colaberrySqlClient.js's getNetworkProjects); the
+  // title/tag search below filters it client-side.
+  async function loadNetworkProjects() {
     setIsLoadingNetworkProjects(true)
     setNetworkLoadError('')
     try {
-      const res = await authFetch(`${BASE_URL}/api/colaberry-import/network-projects?category=${encodeURIComponent(category)}`)
+      const res = await authFetch(`${BASE_URL}/api/colaberry-import/network-projects`)
       const body = res ? await res.json() : null
       if (!body?.success) throw new Error(body?.error?.message || 'Failed to load network projects.')
       setNetworkProjects(body.data.projects || [])
@@ -314,20 +316,6 @@ function Header({ onLogout }) {
     } finally {
       setIsLoadingNetworkProjects(false)
     }
-  }
-
-  async function loadNetworkCategories() {
-    try {
-      const res = await authFetch(`${BASE_URL}/api/colaberry-import/network-project-categories`)
-      const body = res ? await res.json() : null
-      if (body?.success) setNetworkCategories(body.data.categories || [])
-    } catch { /* category pill counts are supplementary — the project list still works without them */ }
-  }
-
-  function selectNetworkCategory(category) {
-    setNetworkCategory(category)
-    setNetworkSearchQuery('')
-    loadNetworkProjects(category)
   }
 
   function toggleNetworkLink(link) {
@@ -844,11 +832,10 @@ function Header({ onLogout }) {
                       setColaberryLinksError('')
                       setColaberryLinksMode('network')
                       setSelectedNetworkLinks([])
-                      setNetworkCategory('All')
                       setNetworkSearchQuery('')
+                      setNetworkTagSearchQuery('')
                       setShowColaberryLinksPrompt(true)
-                      loadNetworkProjects('All')
-                      loadNetworkCategories()
+                      loadNetworkProjects()
                     }}
                     className="flex items-center gap-2.5 px-3 py-2.5 rounded-xl border border-dashed border-emerald-200 bg-emerald-50/50 hover:bg-emerald-50 hover:border-emerald-300 transition text-left"
                   >
@@ -874,9 +861,13 @@ function Header({ onLogout }) {
             )}
 
             {showColaberryLinksPrompt && (() => {
-              const visibleNetworkProjects = networkProjects.filter(p =>
-                !networkSearchQuery.trim() || p.title.toLowerCase().includes(networkSearchQuery.trim().toLowerCase())
-              )
+              const visibleNetworkProjects = networkProjects.filter(p => {
+                const matchesTitle = !networkSearchQuery.trim() ||
+                  p.title.toLowerCase().includes(networkSearchQuery.trim().toLowerCase())
+                const matchesTag = !networkTagSearchQuery.trim() ||
+                  (p.tags || '').toLowerCase().includes(networkTagSearchQuery.trim().toLowerCase())
+                return matchesTitle && matchesTag
+              })
               const allVisibleSelected = visibleNetworkProjects.length > 0 &&
                 visibleNetworkProjects.every(p => selectedNetworkLinks.includes(p.projectLink))
               const toggleSelectAllVisible = () => {
@@ -959,31 +950,12 @@ function Header({ onLogout }) {
                         />
                       ) : (
                         <>
-                          <div className="flex flex-wrap gap-2 mb-3">
-                            {['All', ...networkCategories.map(c => c.name)].map(cat => {
-                              const count = cat === 'All' ? null : networkCategories.find(c => c.name === cat)?.count
-                              return (
-                                <button
-                                  key={cat}
-                                  onClick={() => selectNetworkCategory(cat)}
-                                  className={`px-3 py-1 rounded-full text-xs font-semibold border transition ${
-                                    networkCategory === cat
-                                      ? 'bg-indigo-600 border-indigo-600 text-white'
-                                      : 'bg-white border-gray-200 text-gray-600 hover:border-gray-300'
-                                  }`}
-                                >
-                                  {cat}{count != null ? ` (${count})` : ''}
-                                </button>
-                              )
-                            })}
-                          </div>
-
-                          <div className="flex items-center gap-2 mb-3">
+                          <div className="flex items-center gap-2 mb-2">
                             <input
                               type="text"
                               value={networkSearchQuery}
                               onChange={e => setNetworkSearchQuery(e.target.value)}
-                              placeholder="Search network projects…"
+                              placeholder="Search by project title…"
                               className="flex-1 text-sm border border-gray-200 rounded-xl px-3 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-200"
                             />
                             <button
@@ -995,6 +967,14 @@ function Header({ onLogout }) {
                             </button>
                           </div>
 
+                          <input
+                            type="text"
+                            value={networkTagSearchQuery}
+                            onChange={e => setNetworkTagSearchQuery(e.target.value)}
+                            placeholder="Search by tag (e.g. Power BI, Python, Healthcare)…"
+                            className="w-full text-sm border border-gray-200 rounded-xl px-3 py-2 mb-3 focus:outline-none focus:ring-2 focus:ring-indigo-200"
+                          />
+
                           {networkLoadError && (
                             <p className="text-xs text-red-500 mb-3">{networkLoadError}</p>
                           )}
@@ -1004,7 +984,7 @@ function Header({ onLogout }) {
                               <p className="text-sm text-gray-400 text-center py-8">Loading network projects…</p>
                             ) : visibleNetworkProjects.length === 0 ? (
                               <p className="text-sm text-gray-400 text-center py-8">
-                                {networkSearchQuery.trim() ? 'No projects match your search.' : 'No projects found in this category.'}
+                                {networkSearchQuery.trim() || networkTagSearchQuery.trim() ? 'No projects match your search.' : 'No network projects found.'}
                               </p>
                             ) : (
                               visibleNetworkProjects.map(project => (
@@ -1024,6 +1004,9 @@ function Header({ onLogout }) {
                                   <div className="min-w-0">
                                     <p className="text-sm font-semibold text-gray-900 truncate">{project.title}</p>
                                     <p className="text-xs text-gray-500 line-clamp-2">{project.summary}</p>
+                                    {project.tags && (
+                                      <p className="text-[10px] text-indigo-400 truncate mt-0.5">{project.tags}</p>
+                                    )}
                                   </div>
                                 </label>
                               ))
