@@ -382,6 +382,16 @@ Security is not a layer on top of the app, it is woven into every module. The ru
 - If a secret is accidentally committed, treat it as compromised: rotate immediately, then clean history.
 - All scripts that read secrets must redact them in any log output (`process.env.MANDRILL_API_KEY` becomes `<redacted>` in any log line that references it).
 
+### Claude Code agent restrictions (added after real incidents — a Postgres password, a GitHub OAuth client secret, and a server IP each got printed into a conversation transcript during the 2026-08-14/15 deployment session, despite the general rule above already existing)
+
+The general "never print secrets" rule is not self-enforcing — it was violated multiple times by specific command choices that looked safe but weren't. These are now forbidden outright, not just discouraged:
+
+- **Never run `cat`, `cat -A`, `head`, `tail`, `more`, or `less` on a file known or suspected to contain secrets** — not even to check for corruption, whitespace, or line-ending issues. Use `grep -c "^KEY=.\+$" file` (non-empty check), `wc -c` (length check), or `file`/`diff` on redacted copies instead. This is what actually leaked the GitHub OAuth client secret — `cat -A` was run "just to check for CRLF," and it printed the value.
+- **Never build a redaction regex (`sed`, `grep -o`, etc.) and trust it without first confirming the pattern matches the real format of the value.** A `postgresql://` vs `postgres://` scheme mismatch silently defeated a redaction attempt and printed a real Postgres password. If a value must be masked, prefer extracting only the key name or an existence boolean over trying to partially display a "safely truncated" value.
+- **Any command whose stderr could contain sensitive data (hostnames the user has asked not to reveal, connection details, tokens in verbose/debug output) must not be blindly combined with `2>&1` into visible output.** `ssh`'s own "permanently added to known hosts" warning printed a server IP the user had explicitly asked not to be shown, twice, this way. Route stderr through `2>/dev/null` or inspect it separately before deciding it's safe to show.
+- **When a user says "don't print X" (an IP, a hostname, a key), treat it as covering every indirect path X could leak through** — command echoes, tool warnings, error messages, verbose output — not just a direct `echo "$X"`. If a command's output might contain it, redact or suppress before running, not after seeing what came back.
+- If a secret does leak into the conversation despite the above, say so immediately and plainly (don't bury it in an otherwise-successful result), and recommend rotating that specific credential — an exposed value in a transcript is compromised the same way a committed one is.
+
 ## External calls
 
 Every outbound call to an external API MUST include:
