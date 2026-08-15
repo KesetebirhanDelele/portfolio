@@ -127,7 +127,11 @@ async function scrapeSingleProject(page, projectUrl) {
 // Returns { succeeded: [...], failed: [{ url, error }] } — one bad project link
 // never aborts the rest of the batch (Failure-First Design).
 async function scrapeColaberryProjects(storageState, projectUrls) {
-  const browser = await chromium.launch({ headless: true });
+  // --no-sandbox: Chromium's own internal sandbox needs host capabilities
+  // Docker containers don't grant by default — same tradeoff pdfGenerator.js
+  // already makes for Puppeteer. The container itself is the isolation
+  // boundary, and this only ever navigates to Colaberry's own domain.
+  const browser = await chromium.launch({ headless: true, args: ['--no-sandbox'] });
   const succeeded = [];
   const failed = [];
   try {

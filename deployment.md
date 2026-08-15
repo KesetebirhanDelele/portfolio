@@ -492,3 +492,42 @@ chmod 600 ~/.ssh/deploy_<repo-name>
 chmod 644 ~/.ssh/deploy_<repo-name>.pub
 chmod 600 ~/.ssh/config
 From here, git pull on that server only ever touches this one repo, read-only — if the box is compromised, the blast radius stops at this repo instead of every repo your personal account can reach.
+
+---
+
+## Final Production Deployment Checklist (Do This, In Order, When Deploying For Real)
+
+Everything below was built and locally verified in `infra/containerize-app` (`backend/Dockerfile`, `frontend/Dockerfile`, `docker-compose.yml`, `.env.production.example`) and, for items 8–9, discovered by actually hitting real bugs while testing locally on 2026-08-14/15 — not theoretical. Each item says what to do and why, so nothing here needs re-deriving from scratch.
+
+1. **Provision the server.** Hetzner Cloud Console → new Ubuntu 22.04 VM. See Step 1.1 above for sizing.
+2. **Configure the Hetzner Firewall.** Only three rules: `22/tcp` from your IP only, `80/tcp` open to `Any` (nginx). Nothing else — no `443` yet (raw IP, no domain per the decision below), and never `5432`/`6379`/`5000` publicly. See Step 1.2.
+3. **Install Docker CE and create the `deploy` user.** Step 2.1–2.2 above, run as written.
+4. **Set up a repo-scoped SSH deploy key** for this repo specifically, per Part B above. Clone with `git clone git@github.com-portfolio:<org>/portfolio.git /opt/portfolio`.
+5. **Copy the env template and fill in real values:**
+   ```bash
+   cp .env.production.example .env
+   nano .env
+   ```
+   - `POSTGRES_USER`/`POSTGRES_PASSWORD`/`POSTGRES_DB`, `REDIS_PASSWORD`: generate fresh with `openssl rand -hex 20` — do **not** reuse any local dev value.
+   - `JWT_SECRET`, `COLABERRY_SESSION_ENCRYPTION_KEY`, `RESUME_DATA_ENCRYPTION_KEY`, `GITHUB_TOKEN_ENCRYPTION_KEY`: generate fresh with `openssl rand -hex 32` each — again, not the dev values. Reusing dev secrets in prod means a leaked dev `.env` (like the one that already got exposed once this session in chat, a separate incident — see PROGRESS.md) would also compromise production.
+   - `SQL_SERVER`/`SQL_DATABASE`/`SQL_USER`/`SQL_PASSWORD`/`COLABERRY_LOGIN_URL`, `GITHUB_CLIENT_ID`/`GITHUB_CLIENT_SECRET`, `OPENAI_API_KEY`: your real values.
+   - `REDIS_HOST_PORT`: leave unset. It only exists because this dev machine already had two other Redis containers squatting 6379/6380 — a fresh server won't have that conflict, so the default (6379) applies automatically.
+6. **Set `FRONTEND_URL` to the real server address** — e.g. `http://<server-ip>` (no trailing slash, no port; nginx serves on 80). **This is not optional and silently breaks login if wrong**: it's the exact value the backend uses to build the post-login redirect (`${FRONTEND_URL}/auth/callback?token=...`), and testing this locally on 2026-08-14 showed firsthand that getting it wrong doesn't error — it just silently redirects every successful login to the wrong place.
+7. **Update the GitHub OAuth App's Redirect URI** at `github.com/settings/developers` → the app used by `GITHUB_CLIENT_ID` → set the Redirect URI to `${FRONTEND_URL}/api/auth/github/callback` (e.g. `http://<server-ip>/api/auth/github/callback`). Click **Update application**. Note this is simpler in production than it was in local testing: because nginx reverse-proxies `/api/*` on the *same* origin as the frontend (see the URL topology decision above), `FRONTEND_URL` and the OAuth redirect host:port are identical up to the `/api/` prefix — unlike local dev, where the frontend (Vite, a random port) and backend (`:5000`) are genuinely different origins and have to be reasoned about separately. This is a one-time change **you** make as the app owner; individual users never touch GitHub developer settings — they just see GitHub's normal "Authorize" consent screen.
+8. **Build the `colaberry-live-login` image once, directly on the host** (this is deliberate — it's not part of `docker-compose.yml`, because the backend's own `docker run` calls resolve it by name against the host's Docker daemon over the mounted socket, not through Compose):
+   ```bash
+   docker build -t colaberry-live-login backend/services/colaberry-live-login/image/
+   ```
+9. **Bring the stack up:**
+   ```bash
+   docker compose up -d --build
+   docker compose logs migrate      # confirm clean exit (code 0)
+   docker compose ps                # confirm postgres/redis healthy, backend/frontend up
+   ```
+10. **Verify Colaberry SQL Server reachability from this server** before assuming Colaberry import works — untested as of this writing, and if it's IP-allowlisted, Hetzner's IP won't be on that list yet. A simple connectivity check (e.g. a one-off script using `SQL_SERVER`/`SQL_USER` from `.env`, same pattern as `backend/services/colaberrySqlClient.js`) confirms this without waiting for a user to hit the failure first. If it fails, this needs Ali or Colaberry's infra team to allowlist the server's IP — outside either of our control, budget real time for this.
+11. **Golden-path test, in order:**
+    - Visit `http://<server-ip>/` — confirm the login page loads (not the Docker-Desktop-on-Windows port-forwarding issue seen locally — real Linux host networking doesn't have that limitation).
+    - Click "Sign in with GitHub", authorize, confirm you land back on `http://<server-ip>/` logged in (not bounced to an unrelated already-open tab, the exact confusion that happened during local testing — on a fresh server there's no other app already logged in to confuse this).
+    - Confirm a real row exists: `docker compose exec postgres psql -U <POSTGRES_USER> -d <POSTGRES_DB> -c "SELECT github_username, created_at FROM users;"`.
+    - Test a Colaberry import (validates item 10 actually worked).
+    - If testing live-login: confirm a session actually starts (validates the `network_mode: host` + Docker-socket design end-to-end on the real Linux host — this is the one piece Docker Desktop on Windows couldn't fully validate).
