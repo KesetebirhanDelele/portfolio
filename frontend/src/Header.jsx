@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import AnalysisPanel from './AnalysisPanel'
 import PortfolioBuilder from './PortfolioBuilder'
 import ColaberryLiveLogin from './ColaberryLiveLogin'
@@ -57,6 +57,56 @@ function formatDate(iso) {
 
 const PAGE_SIZE = 3
 
+// Faceted multi-select dropdown (checkboxes) — used for the Colaberry network
+// browser's Categories/Tags filters. OR within the list, closes on outside click.
+function NetworkFilterDropdown({ label, options, selected, onToggle }) {
+  const [isOpen, setIsOpen] = useState(false)
+  const ref = useRef(null)
+
+  useEffect(() => {
+    if (!isOpen) return
+    const handleClickOutside = (e) => {
+      if (ref.current && !ref.current.contains(e.target)) setIsOpen(false)
+    }
+    document.addEventListener('mousedown', handleClickOutside)
+    return () => document.removeEventListener('mousedown', handleClickOutside)
+  }, [isOpen])
+
+  return (
+    <div className="relative" ref={ref}>
+      <button
+        type="button"
+        onClick={() => setIsOpen(o => !o)}
+        className="flex items-center justify-between gap-2 text-sm border border-gray-200 rounded-xl px-3 py-2 bg-white hover:border-gray-300 transition w-full"
+      >
+        <span className="truncate">{label}{selected.length > 0 ? ` (${selected.length})` : ''}</span>
+        <svg className={`w-3.5 h-3.5 text-gray-400 flex-shrink-0 transition-transform ${isOpen ? 'rotate-180' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
+          <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
+        </svg>
+      </button>
+      {isOpen && (
+        <div className="absolute z-10 mt-1 w-64 max-h-64 overflow-y-auto bg-white border border-gray-200 rounded-xl shadow-lg p-2">
+          {options.length === 0 ? (
+            <p className="text-xs text-gray-400 px-2 py-1">No options</p>
+          ) : (
+            options.map(opt => (
+              <label key={opt} className="flex items-center gap-2 px-2 py-1.5 rounded-lg hover:bg-gray-50 cursor-pointer text-sm text-gray-700">
+                <input
+                  type="checkbox"
+                  checked={selected.includes(opt)}
+                  onChange={() => onToggle(opt)}
+                  className="flex-shrink-0"
+                />
+                <span className="truncate">{opt}</span>
+              </label>
+            ))
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
 function Header({ onLogout }) {
   const [repos, setRepos]                 = useState([])
   const [loading, setLoading]             = useState(true)
@@ -96,7 +146,8 @@ function Header({ onLogout }) {
   const [colaberryLinksMode, setColaberryLinksMode]   = useState('network') // 'network' | 'paste'
   const [networkProjects, setNetworkProjects]         = useState([])
   const [networkSearchQuery, setNetworkSearchQuery]   = useState('')
-  const [networkTagSearchQuery, setNetworkTagSearchQuery] = useState('')
+  const [networkSelectedCategories, setNetworkSelectedCategories] = useState([])
+  const [networkSelectedTags, setNetworkSelectedTags] = useState([])
   const [isLoadingNetworkProjects, setIsLoadingNetworkProjects] = useState(false)
   const [networkLoadError, setNetworkLoadError]       = useState('')
   const [selectedNetworkLinks, setSelectedNetworkLinks] = useState([])
@@ -833,7 +884,8 @@ function Header({ onLogout }) {
                       setColaberryLinksMode('network')
                       setSelectedNetworkLinks([])
                       setNetworkSearchQuery('')
-                      setNetworkTagSearchQuery('')
+                      setNetworkSelectedCategories([])
+                      setNetworkSelectedTags([])
                       setShowColaberryLinksPrompt(true)
                       loadNetworkProjects()
                     }}
@@ -861,13 +913,30 @@ function Header({ onLogout }) {
             )}
 
             {showColaberryLinksPrompt && (() => {
+              // tags/tagCategories come back as comma-separated strings per
+              // project (colaberrySqlClient.js) — split once here for both
+              // building the dropdown option lists and matching selections.
+              const splitList = (str) => (str || '').split(',').map(s => s.trim()).filter(Boolean)
+              const allNetworkCategories = [...new Set(networkProjects.flatMap(p => splitList(p.tagCategories)))].sort()
+              const allNetworkTags = [...new Set(networkProjects.flatMap(p => splitList(p.tags)))].sort()
+
               const visibleNetworkProjects = networkProjects.filter(p => {
-                const matchesTitle = !networkSearchQuery.trim() ||
-                  p.title.toLowerCase().includes(networkSearchQuery.trim().toLowerCase())
-                const matchesTag = !networkTagSearchQuery.trim() ||
-                  (p.tags || '').toLowerCase().includes(networkTagSearchQuery.trim().toLowerCase())
-                return matchesTitle && matchesTag
+                const matchesSearch = !networkSearchQuery.trim() ||
+                  p.title.toLowerCase().includes(networkSearchQuery.trim().toLowerCase()) ||
+                  (p.tags || '').toLowerCase().includes(networkSearchQuery.trim().toLowerCase())
+                const matchesCategories = networkSelectedCategories.length === 0 ||
+                  splitList(p.tagCategories).some(c => networkSelectedCategories.includes(c))
+                const matchesTags = networkSelectedTags.length === 0 ||
+                  splitList(p.tags).some(t => networkSelectedTags.includes(t))
+                return matchesSearch && matchesCategories && matchesTags
               })
+              const toggleNetworkCategory = (cat) => setNetworkSelectedCategories(prev =>
+                prev.includes(cat) ? prev.filter(c => c !== cat) : [...prev, cat]
+              )
+              const toggleNetworkTag = (tag) => setNetworkSelectedTags(prev =>
+                prev.includes(tag) ? prev.filter(t => t !== tag) : [...prev, tag]
+              )
+              const hasActiveFilters = networkSearchQuery.trim() || networkSelectedCategories.length > 0 || networkSelectedTags.length > 0
               const allVisibleSelected = visibleNetworkProjects.length > 0 &&
                 visibleNetworkProjects.every(p => selectedNetworkLinks.includes(p.projectLink))
               const toggleSelectAllVisible = () => {
@@ -950,12 +1019,28 @@ function Header({ onLogout }) {
                         />
                       ) : (
                         <>
-                          <div className="flex items-center gap-2 mb-2">
+                          <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 mb-3">
+                            <div className="w-full sm:w-40">
+                              <NetworkFilterDropdown
+                                label="Categories"
+                                options={allNetworkCategories}
+                                selected={networkSelectedCategories}
+                                onToggle={toggleNetworkCategory}
+                              />
+                            </div>
+                            <div className="w-full sm:w-40">
+                              <NetworkFilterDropdown
+                                label="Tags"
+                                options={allNetworkTags}
+                                selected={networkSelectedTags}
+                                onToggle={toggleNetworkTag}
+                              />
+                            </div>
                             <input
                               type="text"
                               value={networkSearchQuery}
                               onChange={e => setNetworkSearchQuery(e.target.value)}
-                              placeholder="Search by project title…"
+                              placeholder="Search by project name or tag…"
                               className="flex-1 text-sm border border-gray-200 rounded-xl px-3 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-200"
                             />
                             <button
@@ -965,15 +1050,19 @@ function Header({ onLogout }) {
                             >
                               {allVisibleSelected ? 'Clear All' : 'Select All'}
                             </button>
+                            {hasActiveFilters && (
+                              <button
+                                onClick={() => {
+                                  setNetworkSearchQuery('')
+                                  setNetworkSelectedCategories([])
+                                  setNetworkSelectedTags([])
+                                }}
+                                className="px-3 py-2 rounded-xl text-xs font-semibold border border-gray-200 text-gray-500 hover:bg-gray-50 transition whitespace-nowrap"
+                              >
+                                Clear filters
+                              </button>
+                            )}
                           </div>
-
-                          <input
-                            type="text"
-                            value={networkTagSearchQuery}
-                            onChange={e => setNetworkTagSearchQuery(e.target.value)}
-                            placeholder="Search by tag (e.g. Power BI, Python, Healthcare)…"
-                            className="w-full text-sm border border-gray-200 rounded-xl px-3 py-2 mb-3 focus:outline-none focus:ring-2 focus:ring-indigo-200"
-                          />
 
                           {networkLoadError && (
                             <p className="text-xs text-red-500 mb-3">{networkLoadError}</p>
@@ -984,7 +1073,7 @@ function Header({ onLogout }) {
                               <p className="text-sm text-gray-400 text-center py-8">Loading network projects…</p>
                             ) : visibleNetworkProjects.length === 0 ? (
                               <p className="text-sm text-gray-400 text-center py-8">
-                                {networkSearchQuery.trim() || networkTagSearchQuery.trim() ? 'No projects match your search.' : 'No network projects found.'}
+                                {hasActiveFilters ? 'No projects match your filters.' : 'No network projects found.'}
                               </p>
                             ) : (
                               visibleNetworkProjects.map(project => (
