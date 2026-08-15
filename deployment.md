@@ -1,86 +1,123 @@
-# Deploying a Dockerized Project to Hetzner Cloud
+# Deploying Repo2Reputation to Hetzner Cloud
 
-This document describes the general procedure for deploying a multi-service Docker Compose application to a Hetzner Cloud VPS. All section headings marked with `[CUSTOMIZE]` contain project-specific values that must be updated for each deployment.
+This is the real, tested runbook for this app specifically — not a generic template. Every command here was actually run against the production server on 2026-08-15 and worked. Follow it in order for a repeat deployment (a rebuild, a new environment, disaster recovery) and it should go smoothly with no re-derivation needed.
 
----
-
-## Prerequisites
-
-- A [Hetzner Cloud](https://console.hetzner.cloud/) account
-- A project repository with a `docker-compose.yml` and at least one `Dockerfile`
-- SSH key registered in Hetzner Cloud
-- Domain or static IP for the project (domain optional for early deployments)
+**Stack**: Postgres, Redis, a Node/Express backend (Puppeteer + Playwright for PDF/scraping), and an nginx-served React frontend — four containers total via `docker-compose.yml` in this repo.
 
 ---
 
-## Step 1 — Provision the Server
+## Architecture decisions (why the setup looks the way it does)
 
-### 1.1 Create a Cloud VM
+### URL topology: one origin, path-based routing
 
-In the Hetzner Cloud Console:
+Only two things get a public URL — everything else stays internal:
 
-1. **New Server** → choose a datacenter region (e.g., `nbg1` Nuremberg or `fsn1` Falkenstein)
-2. **Image**: Ubuntu 22.04 LTS
-3. **Type** `[CUSTOMIZE]`: Start with the smallest instance that fits your workload:
-   - `CX22` — 2 vCPU / 4 GB RAM — suitable for light workloads
-   - `CPX21` — 3 vCPU / 4 GB RAM — better under sustained API load
-   - `CPX31` — 4 vCPU / 8 GB RAM — multiple workers + DB on same host
-4. **SSH Keys**: add your public key
-5. **Firewall**: create a firewall rule set (see §1.2)
-6. Click **Create & Buy**
+| Service | Public? |
+|---|---|
+| Frontend (nginx serving the Vite build) | Yes — `/` |
+| Backend (Express) | Yes — reverse-proxied at `/api/*`, **same origin** as the frontend |
+| Postgres | No — loopback-only (`127.0.0.1:5432`), never bound to `0.0.0.0` |
+| Redis | No — same, loopback-only |
 
-### 1.2 Configure Firewall Rules
+Single origin, path-based routing (`server/` → frontend, `server/api/*` → backend) instead of subdomains: one DNS record if/when a domain gets added, one TLS cert, and same-origin requests mean **zero CORS configuration needed**. Revisit only if frontend and backend ever need independent scaling or deploy cadence — neither applies at this app's scale.
 
-Create a Hetzner Firewall and attach it to the server. Open inbound TCP on the ports your services expose. Example baseline:
+### The Colaberry live-login feature forces `network_mode: host` — this is the load-bearing decision in the whole compose file
 
-| Port | Protocol | Source    | Purpose                        |
-|------|----------|-----------|--------------------------------|
-| 22   | TCP      | Your IP   | SSH access (restrict to your IP) |
-| 80   | TCP      | Any       | HTTP (redirect to HTTPS if using Caddy/Nginx) |
-| 443  | TCP      | Any       | HTTPS (reverse proxy)          |
-| `[CUSTOMIZE]` | TCP | Any | Public service ports (API, frontend, etc.) |
+`backend/services/colaberryLiveLoginSessionManager.js` shells out to the `docker` CLI directly (sibling-container pattern, not Docker-in-Docker) to spawn/tear down per-session browser containers over the mounted host socket. Those sibling containers publish their ports as `-p 127.0.0.1::PORT` — because the backend talks to the **host's** Docker daemon over the mounted socket, that bind is to the **host's** loopback, not the backend container's own network namespace.
 
-> **Do not expose** database ports (5432), Redis (6379), or admin tools (e.g., Adminer on 8080) to the public internet. Use SSH tunnels for local access.
+Concretely: `waitForDriverReady()` and `colaberryLiveLoginWsProxy.js` connect to `http://127.0.0.1:<assignedPort>`. Under normal Docker bridge networking, that `127.0.0.1` resolves to the container itself — those connections would simply fail. The fix is that **the backend service runs with `network_mode: host`**, so its `127.0.0.1` really is the host's loopback, matching what the sibling containers publish to.
+
+This one setting cascades into everything else in `docker-compose.yml`:
+- Postgres and Redis publish to `127.0.0.1` on the **host** (not an isolated Compose network) — the host-networked backend reaches them via `localhost:<port>`, not Docker DNS service names.
+- The frontend/nginx container is *also* `network_mode: host`, for the same reason: its `/api/*` reverse-proxy target (`127.0.0.1:5000`) only resolves correctly under host networking.
+- The backend's own port (5000) ends up directly on the host network — the Hetzner Firewall (below) is what keeps it from being publicly reachable, not Compose.
+- The `colaberry-live-login` image is *not* part of `docker-compose.yml` — the backend's `docker run` calls resolve it by name against the host daemon's local image cache, so it has to be built once, directly on the host, separately.
+
+**Chose full socket mount over skipping live-login** — accepted the larger blast radius (root-equivalent host access from inside the backend container if it's ever compromised) for full feature parity from day one. This was a deliberate call, not a default.
+
+### Secrets: real credentials carried over, everything else generated fresh on the server
+
+`SQL_SERVER`/`SQL_DATABASE`/`SQL_USER`/`SQL_PASSWORD`, `COLABERRY_LOGIN_URL`, `GITHUB_CLIENT_ID`/`GITHUB_CLIENT_SECRET`, and `OPENAI_API_KEY` are real external credentials tied to real accounts — these get carried over from `backend/.env`, never regenerated. Everything else (`POSTGRES_*`, `REDIS_PASSWORD`, `JWT_SECRET`, `COLABERRY_SESSION_ENCRYPTION_KEY`, `RESUME_DATA_ENCRYPTION_KEY`, `GITHUB_TOKEN_ENCRYPTION_KEY`) gets generated **fresh, directly on the server** with `openssl rand` — never reused from local dev. A leaked dev `.env` should not also compromise production.
 
 ---
 
-## Step 2 — Prepare the Server
+## One-time setup: SSH keys
 
-SSH into the server as root (or a sudo user):
+### Your own login key (if you don't already have one for this server)
+
+```powershell
+ssh-keygen -t ed25519 -C "kes-hetzner-portfolio" -f "$env:USERPROFILE\.ssh\hetzner_portfolio"
+ssh-add "$env:USERPROFILE\.ssh\hetzner_portfolio"
+```
+Add the `.pub` file's contents to the server's SSH keys when creating the VM in the Hetzner Console (or `ssh-copy-id` after the fact). Leave the passphrase set for this one — it's your personal daily-driver key for this server.
+
+### Repo-scoped deploy key (run on the server, as the `deploy` user — see below)
+
+A dedicated keypair per repo means a compromised server only ever exposes read access to *this* repo, not everything your GitHub account can reach.
 
 ```bash
-ssh root@<server-ip>
+ssh-keygen -t ed25519 -C "deploy-portfolio" -f ~/.ssh/deploy_portfolio -N ""
+cat ~/.ssh/deploy_portfolio.pub
 ```
 
-### 2.1 Install Docker CE
+Add the printed public key to the repo as a **read-only** deploy key. The fast way (from your own machine, `gh` CLI authenticated):
+
+```bash
+gh api repos/KesetebirhanDelele/portfolio/keys -f title="hetzner-deploy-portfolio" -f key="<pasted pubkey>" -F read_only=true
+```
+
+Then wire SSH to use it for this repo specifically:
+
+```bash
+cat > ~/.ssh/config <<'EOF'
+Host github.com-portfolio
+    HostName github.com
+    User git
+    IdentityFile ~/.ssh/deploy_portfolio
+    IdentitiesOnly yes
+EOF
+chmod 600 ~/.ssh/config ~/.ssh/deploy_portfolio
+chmod 644 ~/.ssh/deploy_portfolio.pub
+
+ssh -o StrictHostKeyChecking=accept-new -T git@github.com-portfolio
+# Expect: "Hi KesetebirhanDelele/portfolio! You've successfully authenticated..."
+```
+
+Clone (or repoint an existing clone's remote) using the alias host, not `github.com` directly:
+```bash
+git clone git@github.com-portfolio:KesetebirhanDelele/portfolio.git /opt/portfolio
+```
+
+---
+
+## Full deployment runbook
+
+Run everything below as `root@<server>` unless a step says otherwise. `$SERVER` = the server's IP or hostname throughout.
+
+### 1. Provision the VM
+
+Hetzner Cloud Console → New Server → Ubuntu 22.04 or newer → add your SSH key → Create. (The current server is `ubuntu-4gb-hel1-1`, running Ubuntu 26.04 LTS.)
+
+### 2. Install Docker CE
 
 ```bash
 apt-get update
 apt-get install -y ca-certificates curl gnupg lsb-release
 
 install -m 0755 -d /etc/apt/keyrings
-curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
-  | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
 chmod a+r /etc/apt/keyrings/docker.gpg
 
-echo \
-  "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] \
-  https://download.docker.com/linux/ubuntu \
-  $(lsb_release -cs) stable" \
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" \
   | tee /etc/apt/sources.list.d/docker.list > /dev/null
 
 apt-get update
 apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+
+docker --version && docker compose version
 ```
 
-Verify:
-
-```bash
-docker --version
-docker compose version
-```
-
-### 2.2 Create a Non-Root Deploy User (Recommended)
+### 3. Create the non-root `deploy` user
 
 ```bash
 useradd -m -s /bin/bash deploy
@@ -88,446 +125,176 @@ usermod -aG docker deploy
 mkdir -p /home/deploy/.ssh
 cp /root/.ssh/authorized_keys /home/deploy/.ssh/
 chown -R deploy:deploy /home/deploy/.ssh
+chmod 700 /home/deploy/.ssh
+chmod 600 /home/deploy/.ssh/authorized_keys
 ```
 
-From now on, SSH as `deploy` rather than `root`.
+### 4. Set up the deploy key and clone (as `deploy`)
 
----
-
-## Step 3 — Deploy the Application
-
-### 3.1 Clone the Repository
-
+Follow "One-time setup: SSH keys" above, then:
 ```bash
-# [CUSTOMIZE] — replace with your repo URL and target directory
-git clone https://github.com/<org>/<repo>.git /opt/<project-name>
-cd /opt/<project-name>
+mkdir -p /opt/portfolio && chown deploy:deploy /opt/portfolio
+su - deploy -c 'git clone git@github.com-portfolio:KesetebirhanDelele/portfolio.git /opt/portfolio'
 ```
 
-### 3.2 Create the Production Environment File
+### 5. Configure the Hetzner Firewall
 
-Copy the environment template and fill in all values:
+Only two rules needed: SSH from your own IP, HTTP open to everyone. **Never** open 5432/6379/5000 publicly — Postgres/Redis stay loopback-only regardless, and 5000 is meant to be reached only through nginx's proxy on 80.
+
+Fastest, repeatable way — via the Hetzner API (needs an API token: Console → Security → API Tokens → generate with Read & Write; keep it in a local `.env`, never in chat/logs):
 
 ```bash
-# [CUSTOMIZE] — name of your example file may differ
+MY_IP=$(curl -s https://api.ipify.org)
+SERVER_ID=$(curl -s -H "Authorization: Bearer $HETZNER_API_KEY" "https://api.hetzner.cloud/v1/servers" \
+  | node -e "let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>console.log(JSON.parse(d).servers[0].id))")
+
+curl -s -X POST "https://api.hetzner.cloud/v1/firewalls" \
+  -H "Authorization: Bearer $HETZNER_API_KEY" -H "Content-Type: application/json" \
+  -d "{
+    \"name\": \"portfolio-firewall\",
+    \"rules\": [
+      {\"direction\": \"in\", \"protocol\": \"tcp\", \"port\": \"22\", \"source_ips\": [\"${MY_IP}/32\"]},
+      {\"direction\": \"in\", \"protocol\": \"tcp\", \"port\": \"80\", \"source_ips\": [\"0.0.0.0/0\", \"::/0\"]}
+    ],
+    \"apply_to\": [{\"type\": \"server\", \"server\": {\"id\": ${SERVER_ID}}}]
+  }"
+```
+
+Verify: SSH still works, `curl http://$SERVER/` returns 200, `curl http://$SERVER:5000/` times out (blocked, correct).
+
+If your own IP changes (new location, VPN), update the rule's `source_ips` via `PUT /v1/firewalls/{id}/rules` or you'll lock yourself out of SSH.
+
+### 6. Build the production `.env`
+
+```bash
+su - deploy -c '
+cd /opt/portfolio
 cp .env.production.example .env
-nano .env   # or use vim / any editor
+
+# Fresh secrets — never reused from local dev
+sed -i "s#^POSTGRES_USER=.*#POSTGRES_USER=r2r_prod#" .env
+sed -i "s#^POSTGRES_PASSWORD=.*#POSTGRES_PASSWORD=$(openssl rand -hex 20)#" .env
+sed -i "s#^POSTGRES_DB=.*#POSTGRES_DB=repo2reputation#" .env
+sed -i "s#^REDIS_PASSWORD=.*#REDIS_PASSWORD=$(openssl rand -hex 20)#" .env
+sed -i "s#^JWT_SECRET=.*#JWT_SECRET=$(openssl rand -hex 32)#" .env
+sed -i "s#^COLABERRY_SESSION_ENCRYPTION_KEY=.*#COLABERRY_SESSION_ENCRYPTION_KEY=$(openssl rand -hex 32)#" .env
+sed -i "s#^RESUME_DATA_ENCRYPTION_KEY=.*#RESUME_DATA_ENCRYPTION_KEY=$(openssl rand -hex 32)#" .env
+sed -i "s#^GITHUB_TOKEN_ENCRYPTION_KEY=.*#GITHUB_TOKEN_ENCRYPTION_KEY=$(openssl rand -hex 32)#" .env
+chmod 600 .env
+'
 ```
 
-Critical variables to set `[CUSTOMIZE]`:
-
-```dotenv
-# Application
-APP_ENV=production          # Must be "production" — prevents dev-only routes from loading
-
-# Database credentials — generate strong random passwords
-POSTGRES_USER=<db_user>
-POSTGRES_PASSWORD=<strong_random_password>
-POSTGRES_DB=<db_name>
-DATABASE_URL=postgresql://<db_user>:<password>@pgbouncer:5432/<db_name>
-
-# Redis
-REDIS_HOST=redis            # Docker internal hostname; do not change if using Compose
-
-# Public URLs — used at build time for frontend assets
-# [CUSTOMIZE] — set to your server IP or domain
-DASHBOARD_API_URL=http://<server-ip>:<api-port>
-WS_URL=ws://<server-ip>:<api-port>
-ALLOW_ORIGINS=http://<server-ip>:<frontend-port>
-
-# External service API keys [CUSTOMIZE]
-SOME_API_KEY=<value>
-ANOTHER_SECRET=<value>
-```
-
-> **Security rule**: Never commit `.env` to Git. Verify `.gitignore` lists `.env` before the first deploy.
-
-### 3.3 Build and Start Services
+For the real-credential values (`SQL_SERVER`, `SQL_DATABASE`, `SQL_USER`, `SQL_PASSWORD`, `COLABERRY_LOGIN_URL`, `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`, `OPENAI_API_KEY`) — transfer `backend/.env` from your dev machine directly via `scp` (never through a terminal that prints its contents), extract just those keys into the server's `.env`, then shred the transferred copy:
 
 ```bash
-cd /opt/<project-name>
+# from your local machine:
+scp backend/.env root@$SERVER:/tmp/.env_transfer
+
+# on the server:
+for key in SQL_SERVER SQL_DATABASE SQL_USER SQL_PASSWORD COLABERRY_LOGIN_URL GITHUB_CLIENT_ID GITHUB_CLIENT_SECRET OPENAI_API_KEY; do
+  val=$(grep "^${key}=" /tmp/.env_transfer | head -1)
+  [ -n "$val" ] && sed -i "s#^${key}=.*#${val}#" /opt/portfolio/.env
+done
+rm -f /tmp/.env_transfer
+```
+
+Finally, set `FRONTEND_URL` — **this is not optional and fails silently if wrong**. It's the exact value the backend uses to build the post-login redirect (`${FRONTEND_URL}/auth/callback?token=...`); getting it wrong doesn't error, it just silently sends every successful login to the wrong place.
+
+```bash
+su - deploy -c "sed -i 's#^FRONTEND_URL=.*#FRONTEND_URL=http://${SERVER}#' /opt/portfolio/.env"
+```
+
+### 7. Update the GitHub OAuth App's Redirect URI
+
+`github.com/settings/developers` → the app matching `GITHUB_CLIENT_ID` → add a Redirect URI: `${FRONTEND_URL}/api/auth/github/callback` (e.g. `http://<server-ip>/api/auth/github/callback`) → **Update application**. Keep the `localhost:5000` entry too if you still test locally.
+
+This is simpler here than in local dev: because nginx reverse-proxies `/api/*` on the *same* origin as the frontend, `FRONTEND_URL` and the OAuth redirect are identical up to the `/api/` prefix. This is a one-time change you make as the app owner — individual users never see GitHub developer settings, just the normal "Authorize" consent screen.
+
+### 8. Build the `colaberry-live-login` image (once, directly on the host — not part of Compose)
+
+```bash
+su - deploy -c 'docker build -t colaberry-live-login /opt/portfolio/backend/services/colaberry-live-login/image/'
+```
+
+### 9. Bring the stack up
+
+```bash
+su - deploy -c '
+cd /opt/portfolio
 docker compose up -d --build
+docker compose logs migrate    # confirm clean exit, "Migrations complete!"
+docker compose ps              # postgres/redis healthy, backend/frontend up
+'
 ```
 
-This will:
-1. Build all images defined in `docker-compose.yml`
-2. Start every service in the correct dependency order
-3. Run one-shot jobs (e.g., database migrations) before the app starts
+### 10. Verify Colaberry SQL Server reachability
 
-> **Note**: Code is baked into Docker images at build time. A plain `docker compose restart <service>` does **not** pick up code changes. Always use `--build` after a code update.
-
-### 3.4 Verify the Deploy
+External dependency, outside our control — worth confirming before a user hits the failure first. If it fails, it needs Ali or Colaberry's infra team to allowlist the server's IP.
 
 ```bash
-# All services should show "Up" or "healthy"
-docker compose ps
+docker exec portfolio-backend-1 node -e "
+const { getNetworkProjects } = require('/app/services/colaberrySqlClient');
+getNetworkProjects().then(p => console.log('OK -', p.length, 'projects')).catch(e => console.log('FAILED -', e.message));
+"
+```
 
-# Check that the migration job exited cleanly (exit code 0)
+### 11. Golden-path test
+
+- Visit `http://$SERVER/` — login page loads.
+- "Sign in with GitHub" → authorize → land back on `http://$SERVER/`, logged in.
+- Confirm a real row: `docker compose exec postgres psql -U <POSTGRES_USER> -d <POSTGRES_DB> -c "SELECT github_username, created_at FROM users;"`.
+- Test a Colaberry import (exercises item 10 for real).
+- If testing live-login: confirm a session actually starts — this is the one piece that specifically validates the `network_mode: host` + Docker-socket design end-to-end.
+
+---
+
+## Updating the app after this initial deploy
+
+```bash
+su - deploy -c '
+cd /opt/portfolio
+git pull origin main    # or whichever branch is live
+docker compose up -d --build
 docker compose logs migrate
-
-# Tail live logs from a specific service [CUSTOMIZE]
-docker compose logs -f api
-docker compose logs -f worker-default
-```
-
----
-
-## Step 4 — Updating the Application
-
-For every subsequent code deploy:
-
-```bash
-cd /opt/<project-name>
-git pull origin main                       # or your production branch
-docker compose up -d --build               # rebuild changed images, restart services
-docker compose logs migrate                # confirm migrations succeeded
-docker compose ps                          # confirm all services running
-```
-
-If Docker's layer cache is serving stale code (rare but possible):
-
-```bash
-# [CUSTOMIZE] — replace <service> with the affected service name
-docker compose build --no-cache <service>
-docker compose up -d --no-deps <service>
-```
-
----
-
-## Step 5 — Reverse Proxy and HTTPS (Optional but Recommended)
-
-For production deployments exposed to end users, add a reverse proxy in front of your services to handle TLS termination, domain routing, and port consolidation.
-
-### Option A — Caddy (simplest, automatic HTTPS)
-
-Install Caddy on the host (or add it as a Docker Compose service), then write a `Caddyfile`:
-
-```
-# [CUSTOMIZE]
-yourdomain.com {
-    reverse_proxy localhost:<frontend-port>
-}
-
-api.yourdomain.com {
-    reverse_proxy localhost:<api-port>
-}
-```
-
-Caddy automatically provisions and renews Let's Encrypt certificates.
-
-### Option B — Nginx
-
-```nginx
-# [CUSTOMIZE] /etc/nginx/sites-available/<project>
-server {
-    listen 80;
-    server_name yourdomain.com;
-    return 301 https://$host$request_uri;
-}
-
-server {
-    listen 443 ssl;
-    server_name yourdomain.com;
-
-    ssl_certificate     /etc/letsencrypt/live/yourdomain.com/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/yourdomain.com/privkey.pem;
-
-    location / {
-        proxy_pass http://127.0.0.1:<frontend-port>;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-    }
-}
-```
-
-Use Certbot for certificate management:
-
-```bash
-apt install certbot python3-certbot-nginx
-certbot --nginx -d yourdomain.com
-```
-
----
-
-## Step 6 — Data Persistence and Backups
-
-Docker named volumes survive image rebuilds. The database data lives in a named volume defined in `docker-compose.yml`:
-
-```yaml
-# [CUSTOMIZE] — check your docker-compose.yml for the actual volume name
-volumes:
-  postgres_data:
-```
-
-**Backup before any destructive operation:**
-
-```bash
-# Dump the database from inside the Postgres container [CUSTOMIZE]
-docker compose exec postgres pg_dump -U <db_user> <db_name> > backup_$(date +%Y%m%d).sql
-```
-
-**Destroy everything including data** (use with caution):
-
-```bash
-docker compose down -v   # -v removes named volumes — irreversible
-```
-
-**Restore from a dump:**
-
-```bash
-cat backup_20260101.sql | docker compose exec -T postgres psql -U <db_user> <db_name>
-```
-
----
-
-## Step 7 — Scaling
-
-### Vertical Scaling
-
-Upgrade the Hetzner VM type in the console (requires a server restart):
-
-```
-CX22 (2 vCPU / 4 GB)  →  CPX21  →  CPX31  →  CPX41  →  CCX series
-```
-
-After resize, services restart automatically when the VM comes back up.
-
-### Horizontal Worker Scaling
-
-If your workers use a claim/lease job pattern (idempotent job execution), you can run multiple replicas with no code changes:
-
-```bash
-# [CUSTOMIZE] — replace worker-default with your worker service name
-docker compose up --scale worker-default=3 -d
-```
-
-### Connection Pooling
-
-Add PgBouncer between application services and Postgres when the number of Postgres connections becomes a bottleneck. Set `pool_mode = transaction` and configure max connections in `pgbouncer.ini`. Application services connect to `pgbouncer:5432` instead of `postgres:5432`. The migration service should always connect directly to `postgres:5432` (DDL safety).
-
----
-
-## Step 8 — Common Operational Commands
-
-```bash
-# View running services
 docker compose ps
+'
+```
+Code is baked into images at build time — `docker compose restart <service>` alone will **not** pick up new code. Always `--build`.
 
-# Follow logs for a service [CUSTOMIZE]
-docker compose logs -f <service-name>
+---
 
-# Open a shell inside a running container [CUSTOMIZE]
-docker compose exec <service-name> bash
+## Operational commands
 
-# Run a database query (psql is not in app containers — use the postgres container)
-docker compose exec postgres psql -U <db_user> -d <db_name>
-
-# Force-rebuild one service without rebuilding others
-docker compose build --no-cache <service>
-docker compose up -d --no-deps <service>
-
-# Restart a service (no code reload — for config-only changes)
-docker compose restart <service>
-
-# Stop everything (keeps volumes)
-docker compose down
-
-# Stop everything and wipe data (IRREVERSIBLE)
-docker compose down -v
+```bash
+docker compose ps                                    # status
+docker compose logs -f backend                        # follow backend logs
+docker compose exec backend sh                         # shell into a container
+docker compose exec postgres psql -U <user> -d <db>    # query the database
+docker compose down                                    # stop everything, keep volumes
+docker compose down -v                                 # stop AND wipe data — IRREVERSIBLE
 ```
 
----
+## Backups
 
-## Deployment Checklist
+```bash
+# Dump
+docker compose exec postgres pg_dump -U <POSTGRES_USER> <POSTGRES_DB> > backup_$(date +%Y%m%d).sql
 
-Use this before every production deploy:
-
-- [ ] `.env` file is present on the server and not committed to Git
-- [ ] `APP_ENV=production` is set
-- [ ] Database credentials are strong and unique
-- [ ] All external API keys and secrets are populated
-- [ ] Public-facing URLs in `.env` match the actual server IP or domain
-- [ ] Firewall rules block database and admin ports from public access
-- [ ] `docker compose ps` shows all services healthy after deploy
-- [ ] Migration logs show clean exit (`Alembic upgrade head` with no errors)
-- [ ] A database backup exists before any schema-changing migration
-- [ ] `.gitignore` includes `.env`, logs, and any generated artifacts
-
----
-
-## Architecture Reference
-
-The pattern used in this project and this guide follows a **single-host Docker Compose** topology:
-
+# Restore
+cat backup_20260101.sql | docker compose exec -T postgres psql -U <POSTGRES_USER> <POSTGRES_DB>
 ```
-Internet
-  │
-  ├─ :80/:443  → Reverse Proxy (Caddy/Nginx) [optional]
-  │                │
-  │                ├─ Frontend        (Next.js / static)
-  │                └─ API             (FastAPI / Express / etc.)
-  │
-  ├─ :XXXX    → Direct port access (pre-proxy phase)
-  │
-Hetzner VM
-  ├── api              (web server)
-  ├── dashboard-api    (secondary API, optional)
-  ├── frontend         (SSR or static frontend)
-  ├── worker-*         (background job workers)
-  ├── postgres         (database, internal only)
-  ├── redis            (queue broker, internal only)
-  ├── pgbouncer        (connection pooler, optional)
-  └── adminer          (DB admin, localhost only)
-```
-
-All services communicate over a Docker Compose internal network. Only explicitly mapped ports are reachable from the host.
+Always back up before a schema-changing migration.
 
 ---
 
-## R2R-Specific Deployment Decisions (filling in this guide's `[CUSTOMIZE]` markers)
+## Deployment checklist (quick reference before any deploy)
 
-This app has never been deployed before — no `docker-compose.yml`/`Dockerfile` exists yet in this repo (as of 2026-08-11). These are the concrete decisions for when that work starts, recorded here so the reasoning isn't re-derived from scratch. See `PROGRESS.md` M66 for the observability/concurrency work (rate limiting, Redis-backed queue, admin stats) that was built ahead of deployment.
-
-### URL topology: one domain, not two
-
-Four services, only two get a public URL:
-
-| Service | Public URL? |
-|---|---|
-| Frontend (Vite/React build) | Yes — served at `/` |
-| Backend API (Express) | Yes — reverse-proxied at `/api/*`, same domain |
-| Postgres | **No.** Internal Docker network only, no host port binding to a public interface. |
-| Redis | **No.** Same — internal only. |
-
-**Recommendation: single domain with path-based routing** (`yourdomain.com/` → frontend static build, `yourdomain.com/api/*` → backend container), not the two-subdomain pattern (`app.` / `api.`) shown in this guide's Option A example. Reasoning: one DNS record, one TLS cert, and same-origin requests mean no CORS configuration is needed at all. The subdomain split earns its complexity when frontend and backend need independent scaling or deploy cadence — neither applies at this app's current scale (single/few users). Revisit only if there's a concrete reason (e.g., wanting the public portfolio-sharing pages on a distinct branded URL from the authenticated app).
-
-### Postgres and Redis: internal-only, not "two more apps with URLs"
-
-Per this guide's own checklist ("Do not expose database ports... or Redis... to the public internet"): both run with no `ports:` mapping to `0.0.0.0` in the production compose file. If admin access is ever needed from a dev machine, use an SSH tunnel, not a public port — same rule this guide already states for Postgres, applied identically to Redis.
-
-**Action item before this ever touches a real server**: the local dev Redis container (`portfolio-redis`, used for the M66 concurrency queue) has no password (`redis:7-alpine` with no `--requirepass`). Fine on localhost-only; must get a password set via `requirepass` (and `REDIS_URL` updated to include it) as part of the production compose file — an unauthenticated Redis instance is a well-known, fast-exploited target if it's ever accidentally exposed.
-
-### Colaberry live-login: Docker socket tradeoff (unresolved)
-
-`services/colaberryLiveLoginSessionManager.js` shells out to the `docker` CLI directly to spawn/tear down per-session browser containers. If the backend runs in its own container, it needs `/var/run/docker.sock` mounted in to keep controlling sibling containers — which is effectively root-equivalent host access from inside that container. Two options, not yet decided:
-1. Mount the socket — full feature parity, larger blast radius if the backend container is ever compromised.
-2. Skip live-login on the first deploy — smaller attack surface, but the Colaberry-import flow that depends on a live-login session becomes unavailable on the server until this is resolved (e.g., a separate, more isolated small VM just for that feature).
-
-### Still open
-
-Hetzner account state (starting fresh vs. already provisioned), and domain vs. raw IP for the first pass — neither has been decided yet.
-
-## Instructions to create new SSH key and instructions to create and use dedicated keypair per repo and implement it for git repo access
-
-# Part A — Creating a new SSH key
-Same command whether it's for your own machine (server login) or on the server itself (repo deploy key) — just pick a distinct filename so you don't overwrite an existing key.
-
-On Windows (PowerShell) — for logging into a new Hetzner server:
-
-
-ssh-keygen -t ed25519 -C "kes-hetzner-<project-name>" -f "$env:USERPROFILE\.ssh\hetzner_<project-name>"
--t ed25519 — modern, fast, smaller than RSA; use -t rsa -b 4096 only if a target system doesn't support ed25519 (rare)
--C — a comment/label, not a secret; makes it identifiable later in authorized_keys or GitHub's key list
--f — explicit filename so it doesn't prompt to overwrite id_ed25519
-Leave the passphrase empty only if this key will be used non-interactively (e.g., a deploy key on a server); use a passphrase for your personal daily-driver key
-This produces two files: hetzner_<project-name> (private — never leave your machine) and hetzner_<project-name>.pub (public — safe to paste anywhere).
-
-On the Ubuntu server (Bash) — same idea, used in Part B for a deploy key:
-
-
-ssh-keygen -t ed25519 -C "deploy-<repo-name>" -f ~/.ssh/deploy_<repo-name> -N ""
--N "" sets an empty passphrase — required here since nothing will be typing it in interactively during git pull.
-
-Add the private key to your local agent if you generated it on Windows for server login:
-
-
-ssh-add "$env:USERPROFILE\.ssh\hetzner_<project-name>"
-
-# Part B — Dedicated deploy keypair per repo, wired into git access
-This runs on the Hetzner server, since that's the machine doing the git clone/git pull.
-
-1. Generate the keypair (as above):
-
-
-ssh-keygen -t ed25519 -C "deploy-<repo-name>" -f ~/.ssh/deploy_<repo-name> -N ""
-2. Print the public key and copy it:
-
-
-cat ~/.ssh/deploy_<repo-name>.pub
-3. Add it to GitHub as a Deploy Key (repo-scoped, not account-wide):
-
-GitHub repo → Settings → Deploy keys → Add deploy key
-Paste the public key
-Leave "Allow write access" unchecked unless the server needs to push (it shouldn't, for a deploy target)
-Save
-4. Tell SSH which key to use for this repo, since GitHub only sees git@github.com and can't otherwise tell your deploy keys apart. Edit ~/.ssh/config on the server:
-
-
-Host github.com-<repo-name>
-    HostName github.com
-    User git
-    IdentityFile ~/.ssh/deploy_<repo-name>
-    IdentitiesOnly yes
-IdentitiesOnly yes is important — without it, SSH may try your other keys first and GitHub will reject them before reaching the right one if you have several deploy keys on the box.
-
-5. Clone using the alias host, not github.com directly:
-
-
-git clone git@github.com-<repo-name>:<org>/<repo-name>.git /opt/<repo-name>
-Existing repo already cloned with a plain URL? Repoint its remote instead of re-cloning:
-
-
-cd /opt/<repo-name>
-git remote set-url origin git@github.com-<repo-name>:<org>/<repo-name>.git
-6. Verify:
-
-
-ssh -T git@github.com-<repo-name>
-Expect: Hi <org>/<repo-name>! You've successfully authenticated, but GitHub does not provide shell access. — confirming it authenticated as the deploy key, scoped to that one repo.
-
-7. Lock down permissions (SSH silently ignores keys with overly-open perms):
-
-
-chmod 600 ~/.ssh/deploy_<repo-name>
-chmod 644 ~/.ssh/deploy_<repo-name>.pub
-chmod 600 ~/.ssh/config
-From here, git pull on that server only ever touches this one repo, read-only — if the box is compromised, the blast radius stops at this repo instead of every repo your personal account can reach.
-
----
-
-## Final Production Deployment Checklist (Do This, In Order, When Deploying For Real)
-
-Everything below was built and locally verified in `infra/containerize-app` (`backend/Dockerfile`, `frontend/Dockerfile`, `docker-compose.yml`, `.env.production.example`) and, for items 8–9, discovered by actually hitting real bugs while testing locally on 2026-08-14/15 — not theoretical. Each item says what to do and why, so nothing here needs re-deriving from scratch.
-
-1. **Provision the server.** Hetzner Cloud Console → new Ubuntu 22.04 VM. See Step 1.1 above for sizing.
-2. **Configure the Hetzner Firewall.** Only three rules: `22/tcp` from your IP only, `80/tcp` open to `Any` (nginx). Nothing else — no `443` yet (raw IP, no domain per the decision below), and never `5432`/`6379`/`5000` publicly. See Step 1.2.
-3. **Install Docker CE and create the `deploy` user.** Step 2.1–2.2 above, run as written.
-4. **Set up a repo-scoped SSH deploy key** for this repo specifically, per Part B above. Clone with `git clone git@github.com-portfolio:<org>/portfolio.git /opt/portfolio`.
-5. **Copy the env template and fill in real values:**
-   ```bash
-   cp .env.production.example .env
-   nano .env
-   ```
-   - `POSTGRES_USER`/`POSTGRES_PASSWORD`/`POSTGRES_DB`, `REDIS_PASSWORD`: generate fresh with `openssl rand -hex 20` — do **not** reuse any local dev value.
-   - `JWT_SECRET`, `COLABERRY_SESSION_ENCRYPTION_KEY`, `RESUME_DATA_ENCRYPTION_KEY`, `GITHUB_TOKEN_ENCRYPTION_KEY`: generate fresh with `openssl rand -hex 32` each — again, not the dev values. Reusing dev secrets in prod means a leaked dev `.env` (like the one that already got exposed once this session in chat, a separate incident — see PROGRESS.md) would also compromise production.
-   - `SQL_SERVER`/`SQL_DATABASE`/`SQL_USER`/`SQL_PASSWORD`/`COLABERRY_LOGIN_URL`, `GITHUB_CLIENT_ID`/`GITHUB_CLIENT_SECRET`, `OPENAI_API_KEY`: your real values.
-   - `REDIS_HOST_PORT`: leave unset. It only exists because this dev machine already had two other Redis containers squatting 6379/6380 — a fresh server won't have that conflict, so the default (6379) applies automatically.
-6. **Set `FRONTEND_URL` to the real server address** — e.g. `http://<server-ip>` (no trailing slash, no port; nginx serves on 80). **This is not optional and silently breaks login if wrong**: it's the exact value the backend uses to build the post-login redirect (`${FRONTEND_URL}/auth/callback?token=...`), and testing this locally on 2026-08-14 showed firsthand that getting it wrong doesn't error — it just silently redirects every successful login to the wrong place.
-7. **Update the GitHub OAuth App's Redirect URI** at `github.com/settings/developers` → the app used by `GITHUB_CLIENT_ID` → set the Redirect URI to `${FRONTEND_URL}/api/auth/github/callback` (e.g. `http://<server-ip>/api/auth/github/callback`). Click **Update application**. Note this is simpler in production than it was in local testing: because nginx reverse-proxies `/api/*` on the *same* origin as the frontend (see the URL topology decision above), `FRONTEND_URL` and the OAuth redirect host:port are identical up to the `/api/` prefix — unlike local dev, where the frontend (Vite, a random port) and backend (`:5000`) are genuinely different origins and have to be reasoned about separately. This is a one-time change **you** make as the app owner; individual users never touch GitHub developer settings — they just see GitHub's normal "Authorize" consent screen.
-8. **Build the `colaberry-live-login` image once, directly on the host** (this is deliberate — it's not part of `docker-compose.yml`, because the backend's own `docker run` calls resolve it by name against the host's Docker daemon over the mounted socket, not through Compose):
-   ```bash
-   docker build -t colaberry-live-login backend/services/colaberry-live-login/image/
-   ```
-9. **Bring the stack up:**
-   ```bash
-   docker compose up -d --build
-   docker compose logs migrate      # confirm clean exit (code 0)
-   docker compose ps                # confirm postgres/redis healthy, backend/frontend up
-   ```
-10. **Verify Colaberry SQL Server reachability from this server** before assuming Colaberry import works — untested as of this writing, and if it's IP-allowlisted, Hetzner's IP won't be on that list yet. A simple connectivity check (e.g. a one-off script using `SQL_SERVER`/`SQL_USER` from `.env`, same pattern as `backend/services/colaberrySqlClient.js`) confirms this without waiting for a user to hit the failure first. If it fails, this needs Ali or Colaberry's infra team to allowlist the server's IP — outside either of our control, budget real time for this.
-11. **Golden-path test, in order:**
-    - Visit `http://<server-ip>/` — confirm the login page loads (not the Docker-Desktop-on-Windows port-forwarding issue seen locally — real Linux host networking doesn't have that limitation).
-    - Click "Sign in with GitHub", authorize, confirm you land back on `http://<server-ip>/` logged in (not bounced to an unrelated already-open tab, the exact confusion that happened during local testing — on a fresh server there's no other app already logged in to confuse this).
-    - Confirm a real row exists: `docker compose exec postgres psql -U <POSTGRES_USER> -d <POSTGRES_DB> -c "SELECT github_username, created_at FROM users;"`.
-    - Test a Colaberry import (validates item 10 actually worked).
-    - If testing live-login: confirm a session actually starts (validates the `network_mode: host` + Docker-socket design end-to-end on the real Linux host — this is the one piece Docker Desktop on Windows couldn't fully validate).
+- [ ] `.env` present on the server, not committed to git, `chmod 600`
+- [ ] Database/Redis/JWT/encryption secrets are fresh, not copied from dev
+- [ ] `FRONTEND_URL` matches the real server address
+- [ ] GitHub OAuth Redirect URI matches `FRONTEND_URL`
+- [ ] Hetzner Firewall: only 22 (your IP) and 80 (any) open
+- [ ] `docker compose ps` shows all services healthy
+- [ ] `docker compose logs migrate` shows a clean exit
+- [ ] Colaberry SQL Server reachability confirmed
+- [ ] Golden-path login test passed, with a real DB row confirmed
