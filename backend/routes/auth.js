@@ -5,6 +5,7 @@ const crypto  = require('crypto');
 const jwt     = require('jsonwebtoken');
 const pool    = require('../db/postgres');
 const { encryptGithubToken } = require('../services/githubTokenCrypto');
+const { getColaberryUserByEmail } = require('../services/colaberrySqlClient');
 
 const router = express.Router();
 
@@ -137,6 +138,33 @@ router.get('/github/callback', async (req, res) => {
       );
 
       return res.redirect(`${frontendUrl}/?connected=${encodeURIComponent(githubUsername)}`);
+    }
+
+    // ── LOGIN MODE: access gate — Colaberry account required ──────────────────
+    // Only people with an active Colaberry account may create or use an
+    // account here — check every *verified* email on the GitHub account, not
+    // just the profile's primary one, since a student's GitHub primary email
+    // is often personal while their Colaberry account uses a school/work
+    // address that may also be verified on the same GitHub account.
+    const verifiedEmails = [...new Set(
+      emails.filter(e => e.verified).map(e => e.email.toLowerCase())
+    )];
+    if (verifiedEmails.length === 0) verifiedEmails.push(primaryEmail.toLowerCase());
+
+    let hasColaberryAccount = false;
+    try {
+      for (const email of verifiedEmails) {
+        if (await getColaberryUserByEmail(email)) { hasColaberryAccount = true; break; }
+      }
+    } catch (err) {
+      // Fail closed: an SQL Server outage must not silently grant access as
+      // if verification had passed — that would defeat the whole gate.
+      console.error('[auth/github] Colaberry account check failed:', err.message);
+      return res.redirect(`${frontendUrl}/auth/callback?error=colaberry_check_failed`);
+    }
+
+    if (!hasColaberryAccount) {
+      return res.redirect(`${frontendUrl}/auth/callback?error=no_colaberry_account`);
     }
 
     // ── LOGIN MODE: upsert user + primary github_account ─────────────────────

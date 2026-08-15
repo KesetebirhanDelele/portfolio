@@ -63,9 +63,17 @@ function LoginForm({ sessionMessage }) {
           )}
 
           <h2 className="text-3xl font-bold text-gray-900 mb-2">Welcome</h2>
-          <p className="text-gray-500 text-sm mb-8">
+          <p className="text-gray-500 text-sm mb-4">
             Analyze your GitHub repositories and generate recruiter-ready portfolios.
           </p>
+
+          {/* Colaberry account requirement — set expectations before the click,
+              not just as a rejection message after a failed attempt. */}
+          <div className="mb-6 px-4 py-3 rounded-xl border border-indigo-100 bg-indigo-50/60 text-indigo-700 text-xs leading-relaxed">
+            <span className="font-semibold">Colaberry students and staff only.</span> Sign in with the
+            GitHub account that has your Colaberry email verified on it — we check for a matching
+            Colaberry account before granting access.
+          </div>
 
           {/* GitHub OAuth button */}
           <button
