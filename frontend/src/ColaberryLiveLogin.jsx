@@ -49,8 +49,14 @@ function ColaberryLiveLogin({ onComplete, onCancel }) {
         sessionRef.current = body.data
         setStatus('connecting')
 
-        const wsProtocol = BASE_URL.startsWith('https') ? 'wss' : 'ws'
-        const wsHost = BASE_URL.replace(/^https?:\/\//, '')
+        // BASE_URL is '' in production (same-origin API calls via nginx's
+        // proxy — see docker-compose.yml's VITE_API_BASE_URL build arg), so
+        // deriving protocol/host from it produced a malformed ws:// URL with
+        // no host — invisible until the page was actually served over HTTPS,
+        // at which point browsers block it outright as mixed content. Fall
+        // back to the page's own origin, same as any same-origin app would.
+        const wsProtocol = (BASE_URL ? BASE_URL.startsWith('https') : window.location.protocol === 'https:') ? 'wss' : 'ws'
+        const wsHost = BASE_URL ? BASE_URL.replace(/^https?:\/\//, '') : window.location.host
         const streamUrl = `${wsProtocol}://${wsHost}/api/colaberry-login/${body.data.sessionId}/stream?token=${encodeURIComponent(body.data.token)}`
 
         const rfb = new RFB(canvasContainerRef.current, streamUrl)
