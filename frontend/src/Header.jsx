@@ -913,26 +913,42 @@ function Header({ onLogout }) {
             )}
 
             {showColaberryLinksPrompt && (() => {
-              // tags/tagCategories come back as comma-separated strings per
-              // project (colaberrySqlClient.js) — split once here for both
-              // building the dropdown option lists and matching selections.
-              const splitList = (str) => (str || '').split(',').map(s => s.trim()).filter(Boolean)
-              const allNetworkCategories = [...new Set(networkProjects.flatMap(p => splitList(p.tagCategories)))].sort()
-              const allNetworkTags = [...new Set(networkProjects.flatMap(p => splitList(p.tags)))].sort()
+              // Each project carries tagsByCategory: { "Category"|"Industry"|"Tools":
+              // [tagName, ...] } — real per-tag category pairing from
+              // vw_ADF_CCS_ProjectTags_New_Catgorize (colaberrySqlClient.js). This
+              // makes the Categories facet a real cascade: picking a category
+              // narrows which tags are even offered, not just which projects show.
+              const projectTags = (p, categories) => {
+                const buckets = p.tagsByCategory || {}
+                return categories.length === 0
+                  ? Object.values(buckets).flat()
+                  : categories.flatMap(c => buckets[c] || [])
+              }
+              const tagsAvailableFor = (categories) =>
+                [...new Set(networkProjects.flatMap(p => projectTags(p, categories)))].sort()
+
+              const allNetworkCategories = [...new Set(networkProjects.flatMap(p => Object.keys(p.tagsByCategory || {})))].sort()
+              const allNetworkTags = tagsAvailableFor(networkSelectedCategories)
 
               const visibleNetworkProjects = networkProjects.filter(p => {
                 const matchesSearch = !networkSearchQuery.trim() ||
                   p.title.toLowerCase().includes(networkSearchQuery.trim().toLowerCase()) ||
                   (p.tags || '').toLowerCase().includes(networkSearchQuery.trim().toLowerCase())
                 const matchesCategories = networkSelectedCategories.length === 0 ||
-                  splitList(p.tagCategories).some(c => networkSelectedCategories.includes(c))
+                  networkSelectedCategories.some(c => (p.tagsByCategory?.[c] || []).length > 0)
                 const matchesTags = networkSelectedTags.length === 0 ||
-                  splitList(p.tags).some(t => networkSelectedTags.includes(t))
+                  projectTags(p, []).some(t => networkSelectedTags.includes(t))
                 return matchesSearch && matchesCategories && matchesTags
               })
-              const toggleNetworkCategory = (cat) => setNetworkSelectedCategories(prev =>
-                prev.includes(cat) ? prev.filter(c => c !== cat) : [...prev, cat]
-              )
+              // Selecting/deselecting a category can shrink the available tag
+              // list — prune any selected tags that fall outside it so a stale,
+              // no-longer-visible tag doesn't silently keep filtering results.
+              const toggleNetworkCategory = (cat) => setNetworkSelectedCategories(prev => {
+                const next = prev.includes(cat) ? prev.filter(c => c !== cat) : [...prev, cat]
+                const stillAvailable = tagsAvailableFor(next)
+                setNetworkSelectedTags(sel => sel.filter(t => stillAvailable.includes(t)))
+                return next
+              })
               const toggleNetworkTag = (tag) => setNetworkSelectedTags(prev =>
                 prev.includes(tag) ? prev.filter(t => t !== tag) : [...prev, tag]
               )

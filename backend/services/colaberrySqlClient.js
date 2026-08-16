@@ -74,36 +74,74 @@ async function getProjectLinksForUser(userId) {
 // on 2026-08-14: it surfaced 54 of the catalog's 250 projects. The view
 // query returns the same 250 (verified: same row/dedup counts as the base
 // table), just enriched with tags, so nothing is filtered out server-side.
+//
+// TagNames/TagCategories on that view are each a DISTINCT-aggregated flat
+// list per project, with the pairing between an individual tag and its
+// category bucket already lost by the time it reaches this app. Since there
+// are only 3 real buckets system-wide ("Category"/"Industry"/"Tools"),
+// almost every project has tags in all 3 — so a category facet built on that
+// column can't meaningfully narrow anything, and can't narrow the tag list
+// either. Confirmed live on 2026-08-16 (246/250 projects had all 3).
+// vw_ADF_CCS_ProjectTags_New_Catgorize has the real per-(project, tag)
+// TagCategory pairing (249/250 deployed projects covered) — used below to
+// build tagsByCategory so the UI can do a real cascading facet. TagStatus
+// 0/null rows are retired tags; "DO NOT USE" is a housekeeping category, not
+// a real one — both excluded.
 async function getNetworkProjects() {
   const pool = await getPool();
-  const result = await pool.request().query(`
-    WITH RankedProjects AS (
-      SELECT
-        projectID, ProjectName, ProjectSummary, ProjectVisual, TagNames, TagCategories,
-        ROW_NUMBER() OVER (
-          PARTITION BY LOWER(LTRIM(RTRIM(ProjectName)))
-          ORDER BY projectID DESC
-        ) AS rowNumber
-      FROM dbo.vw_ADF_Proj_Deployed_WithTags
-      WHERE projectID IS NOT NULL
-        AND ProjectName IS NOT NULL
-        AND LTRIM(RTRIM(ProjectName)) <> ''
-    )
-    SELECT projectID, ProjectName, ProjectSummary, ProjectVisual, TagNames, TagCategories
-    FROM RankedProjects
-    WHERE rowNumber = 1
-    ORDER BY ProjectName
-  `);
+  const [projectsResult, tagsResult] = await Promise.all([
+    pool.request().query(`
+      WITH RankedProjects AS (
+        SELECT
+          projectID, ProjectName, ProjectSummary, ProjectVisual,
+          ROW_NUMBER() OVER (
+            PARTITION BY LOWER(LTRIM(RTRIM(ProjectName)))
+            ORDER BY projectID DESC
+          ) AS rowNumber
+        FROM dbo.vw_ADF_Proj_Deployed_WithTags
+        WHERE projectID IS NOT NULL
+          AND ProjectName IS NOT NULL
+          AND LTRIM(RTRIM(ProjectName)) <> ''
+      )
+      SELECT projectID, ProjectName, ProjectSummary, ProjectVisual
+      FROM RankedProjects
+      WHERE rowNumber = 1
+      ORDER BY ProjectName
+    `),
+    pool.request().query(`
+      SELECT DISTINCT ProjectID, TagCategory, TagName
+      FROM dbo.vw_ADF_CCS_ProjectTags_New_Catgorize
+      WHERE TagStatus = 1
+        AND TagCategory IS NOT NULL AND TagCategory <> 'DO NOT USE'
+        AND TagName IS NOT NULL AND LTRIM(RTRIM(TagName)) <> ''
+    `),
+  ]);
 
-  return result.recordset.map(row => ({
-    networkId:     Number(row.projectID),
-    projectLink:   `https://app.colaberry.com/app/network/network/${row.projectID}/projectinstructions`,
-    title:         row.ProjectName,
-    summary:       row.ProjectSummary || '',
-    imageUrl:      row.ProjectVisual || '',
-    tags:          row.TagNames || '',
-    tagCategories: row.TagCategories || '',
-  }));
+  const tagsByProjectId = new Map();
+  for (const row of tagsResult.recordset) {
+    const pid = Number(row.ProjectID);
+    const category = row.TagCategory.trim();
+    const tagName = row.TagName.trim();
+    if (!tagsByProjectId.has(pid)) tagsByProjectId.set(pid, {});
+    const buckets = tagsByProjectId.get(pid);
+    if (!buckets[category]) buckets[category] = [];
+    if (!buckets[category].includes(tagName)) buckets[category].push(tagName);
+  }
+
+  return projectsResult.recordset.map(row => {
+    const pid = Number(row.projectID);
+    const tagsByCategory = tagsByProjectId.get(pid) || {};
+    const allTags = Object.values(tagsByCategory).flat();
+    return {
+      networkId:     pid,
+      projectLink:   `https://app.colaberry.com/app/network/network/${row.projectID}/projectinstructions`,
+      title:         row.ProjectName,
+      summary:       row.ProjectSummary || '',
+      imageUrl:      row.ProjectVisual || '',
+      tags:          allTags.join(', '),
+      tagsByCategory,
+    };
+  });
 }
 
 module.exports = {
