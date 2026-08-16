@@ -39,6 +39,10 @@ This one setting cascades into everything else in `docker-compose.yml`:
 
 `SQL_SERVER`/`SQL_DATABASE`/`SQL_USER`/`SQL_PASSWORD`, `COLABERRY_LOGIN_URL`, `GITHUB_CLIENT_ID`/`GITHUB_CLIENT_SECRET`, and `OPENAI_API_KEY` are real external credentials tied to real accounts — these get carried over from `backend/.env`, never regenerated. Everything else (`POSTGRES_*`, `REDIS_PASSWORD`, `JWT_SECRET`, `COLABERRY_SESSION_ENCRYPTION_KEY`, `RESUME_DATA_ENCRYPTION_KEY`, `GITHUB_TOKEN_ENCRYPTION_KEY`) gets generated **fresh, directly on the server** with `openssl rand` — never reused from local dev. A leaked dev `.env` should not also compromise production.
 
+### Access control: Colaberry account required to log in at all
+
+GitHub OAuth alone is not sufficient to use the app — `backend/routes/auth.js`'s `/github/callback` checks every *verified* email on the authenticating GitHub account against `getColaberryUserByEmail()` (`colaberrySqlClient.js`, querying `dbo.ADF_ColaberryActiveUsers`). No match, no account. **Fails closed**: if that SQL Server lookup itself errors (an outage, not a "no match" result), the login is rejected the same as a real non-match — an unverifiable check must never be treated as a passed one. This can only be enforced *after* GitHub OAuth completes (GitHub doesn't reveal a user's email before they authorize), so the frontend's pre-click banner on the login page is guidance, not the actual security boundary — the backend check is.
+
 ---
 
 ## One-time setup: SSH keys
@@ -298,3 +302,40 @@ Always back up before a schema-changing migration.
 - [ ] `docker compose logs migrate` shows a clean exit
 - [ ] Colaberry SQL Server reachability confirmed
 - [ ] Golden-path login test passed, with a real DB row confirmed
+
+---
+
+## Path to real production (Colaberry School, not just Kes's testing)
+
+What's live today (raw IP, personal accounts, single server) is a real, working deployment — but "real Colaberry School production, real student load" changes a few things beyond what's built so far. None of this is decided yet; it's written down here so the questions aren't lost, and so nothing below gets executed without an explicit decision first.
+
+### Domain and TLS
+
+Raw IP + plain HTTP was the deliberate choice for getting to a working deployment fast (see "Architecture decisions" above). Real institutional use needs:
+- A real domain/subdomain (e.g. `portfolio.colaberry.com`) with a DNS **A record** pointed at the server.
+- Certbot or Caddy for a free, auto-renewing Let's Encrypt certificate — mechanical once the domain exists.
+- nginx updated to terminate TLS on 443 and redirect 80 → 443.
+
+**Blocking question, not mine to decide**: whose domain? If Colaberry doesn't already have one to use a subdomain of, registering one is a new paid external dependency — an "escalate" item under this repo's own `CLAUDE.md` Autonomy Model, not an implementation detail.
+
+### Infrastructure and credential ownership
+
+Right now, everything runs on Kes's personal accounts:
+- The Hetzner server itself.
+- The GitHub OAuth App (`Repo2Reputation`, registered under `KesetebirhanDelele`).
+- The OpenAI API key (billed personally).
+
+For a tool Colaberry School depends on operationally, this is a real bus-factor and governance risk — access and continuity currently depend on one person's personal accounts staying active and reachable. Moving infrastructure ownership and billing to a Colaberry-controlled account is itself a **production infrastructure change** under this repo's Autonomy Model — requires Ali's sign-off, not something to execute unilaterally.
+
+### Reliability, for real (not test) student load
+
+- **Automated backups.** The `pg_dump` command under "Backups" above is manual — for real use it needs a cron job with retention, not a command someone remembers to run.
+- **Real error tracking.** `@sentry/node` is already wired in (M66) but inert — no `SENTRY_DSN` set, no Sentry project exists yet. Turning this on is cheap once someone creates the project.
+- **A staging environment**, separate from production, so testing new features doesn't risk real student data or a live outage during class hours.
+- **CI/CD** instead of manual SSH deploys, once change frequency picks up past what one person reasonably tracks by hand.
+
+### Compliance / data privacy
+
+If this ends up handling real student data at institutional scale (names, emails, GitHub activity, resume content), that may cross into territory needing an actual privacy/compliance review (e.g., FERPA-adjacent considerations for an educational tool) — flagged here as a real open question, not evaluated or resolved. Per this repo's own `CLAUDE.md`, compliance/security posture changes are an escalation trigger, not an implementation decision.
+
+**Bottom line**: domain + infrastructure ownership is the practical blocker — once decided, TLS/backups/monitoring/staging are mechanical follow-up work. Everything in this section needs Kes and Ali's decision before execution, not a unilateral build.
