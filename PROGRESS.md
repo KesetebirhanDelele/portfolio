@@ -1720,3 +1720,18 @@ Not yet built. Captured here so the plan isn't lost between sessions; pick up wh
   - Next Actions: None.
 
 ---
+
+- [x] M72: Deployed M71 to production; discovered and fixed a stale server IP (`CLAUDE.md`) and a stale Hetzner firewall SSH allowlist that had been silently blocking all SSH access
+  - Date: 2026-08-16
+  - Session: CC-20260814-n9tq (continued)
+  - What changed: Getting M71 onto the server turned into a multi-hour access-recovery detour, root-caused and fixed rather than worked around:
+    - **Wrong documented IP**: `CLAUDE.md`'s "Tooling Assumptions" section (generic, DRI-owned boilerplate — see file header, Ali Muwwakkil) pointed at `ssh root@95.216.199.47` / `/opt/colaberry-accelerator` / `docker-compose.production.yml` / branch `main` — none of which describe this repo's real deployment. The server's actual IP is `46.62.228.67`, path `/opt/portfolio`, plain `docker-compose.yml`, branch `infra/containerize-app`. Every SSH attempt against the documented IP got a live "Permission denied" (a real sshd answering, just not this project's), which read as an auth problem and burned significant time before the mismatch was caught by comparing against the IP shown in the Hetzner Console directly.
+    - **Stale firewall allowlist**: once pointed at the correct IP, SSH still failed — port 22 timed out entirely. `GET /v1/firewalls/{id}` (Hetzner API, `HETZNER_API_KEY` from `.env`, never printed) showed the SSH rule's `source_ips` was locked to `108.48.181.92/32`, an old IP that no longer matched Kes's connection. Confirmed Kes's current IP (`curl -4 ifconfig.me` → `172.56.2.191`) and updated the rule via `POST /v1/firewalls/{id}/actions/set_rules`. SSH worked immediately after, using Kes's existing personal key — no new key needed in the end.
+    - Also generated a dedicated `claude_deploy_portfolio` keypair mid-session intending to give this Claude Code session its own SSH access; abandoned once it became clear the firewall (correctly) restricts SSH to Kes's IP only, and adding a second trusted source would be a security-posture change outside implementation-level autonomy. The keypair sits unused in `~/.ssh/`, harmless, never installed on the server.
+    - `CLAUDE.md`: corrected the Tooling Assumptions line to the real IP/path/branch/deploy command. `deployment.md`: added a "check the firewall first" troubleshooting note next to the existing IP-change warning, and corrected the SSH-key section to note that `~/.ssh/id_ed25519` (Kes's regular key) is what's actually authorized — no dedicated `hetzner_portfolio` key currently exists on Kes's machine despite the "One-time setup" section describing that as the intended setup.
+    - Deployed M71 once access was restored: `su - deploy -c 'cd /opt/portfolio && git pull origin infra/containerize-app && docker compose up -d --build'`.
+  - Verification (real): `docker compose ps` on the server showed `backend` and `frontend` rebuilt and `Up`, migrate log showed "Migrations complete!". Kes asked to verify the live Categories/Tags cascade in-browser as the closing step.
+  - Risks / Limitations: The `CLAUDE.md` line corrected here is DRI-owned per the file's own header (Ali Muwwakkil, quarterly review) — flagging that this specific correction should be visible to Ali at next review even though it was a factual fix (wrong IP/path), not a policy change. The unused `claude_deploy_portfolio` keypair in `~/.ssh/` can be deleted; low priority since it was never authorized anywhere.
+  - Next Actions: None outstanding. Consider setting up the dedicated `hetzner_portfolio`/`deploy_portfolio` keys per `deployment.md`'s original intent next time SSH access is touched, per the note added there.
+
+---

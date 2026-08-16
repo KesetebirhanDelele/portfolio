@@ -168,6 +168,10 @@ Verify: SSH still works, `curl http://$SERVER/` returns 200, `curl http://$SERVE
 
 If your own IP changes (new location, VPN), update the rule's `source_ips` via `PUT /v1/firewalls/{id}/rules` or you'll lock yourself out of SSH.
 
+**If SSH suddenly starts rejecting a key/password that used to work, check this first** — before troubleshooting keys, passwords, or console access. On 2026-08-16 a stale `source_ips` entry (an old IP no longer in use) cost about two hours of unnecessary console/password debugging that a firewall check would have caught in under a minute. Get the server's current firewall rules with `GET https://api.hetzner.cloud/v1/firewalls/{firewall_id}` (Bearer `HETZNER_API_KEY`) and compare `source_ips` against your actual current IP (`curl -4 ifconfig.me`) before assuming the problem is on the server.
+
+Also, in practice the key actually authorized on this server has been Kes's regular default key (`~/.ssh/id_ed25519`), not a dedicated `hetzner_portfolio` key — the "One-time setup" section above describes the intended, more isolated setup, but no `hetzner_portfolio` key currently exists on Kes's machine. Worth doing properly (a server-specific key, so a compromised personal key doesn't also expose this server) next time SSH access is touched.
+
 ### 6. Build the production `.env`
 
 ```bash

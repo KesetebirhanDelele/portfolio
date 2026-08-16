@@ -628,7 +628,7 @@ Claude may assume:
 - VS Code / VSCodium / Cursor may be used
 - Git is present
 - CI runs automated tests where they exist (manual testing is the current default for most surfaces)
-- Production VPS access is via `ssh root@95.216.199.47` to the stack at `/opt/colaberry-accelerator`. Deploys are `git pull origin main && docker compose -f docker-compose.production.yml up -d --build [service]`.
+- Production VPS access is via `ssh root@46.62.228.67` (Hetzner `ubuntu-4gb-hel1-1`) to the stack at `/opt/portfolio`. SSH is firewall-restricted to Kes's current IP — see `deployment.md`'s "Operational commands" section if a firewall update is needed. Deploys are `su - deploy -c 'cd /opt/portfolio && git pull origin infra/containerize-app && docker compose up -d --build'` (see `deployment.md` for the full runbook; this repo isn't on `main` yet, per the standing PR-gate rule).
 
 Claude must NOT assume:
 - Moltbot exists
