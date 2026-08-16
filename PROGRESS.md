@@ -1735,3 +1735,13 @@ Not yet built. Captured here so the plan isn't lost between sessions; pick up wh
   - Next Actions: None outstanding. Consider setting up the dedicated `hetzner_portfolio`/`deploy_portfolio` keys per `deployment.md`'s original intent next time SSH access is touched, per the note added there.
 
 ---
+
+- [x] M73: Wrote a full "Troubleshooting: Recovering SSH Access" runbook into deployment.md, capturing everything learned during M72's two-hour access-recovery detour
+  - Date: 2026-08-16
+  - Session: CC-20260814-n9tq (continued)
+  - What changed: Kes confirmed M71's fix works live and asked for the firewall fix, password tricks, etc. to be documented so the M72 detour doesn't repeat. Added a dedicated section to `deployment.md` (between "Operational commands" and "Backups") with: Step 1 — check the firewall's `source_ips` against current IP first, always, with the exact `curl` commands (list rules, then `set_rules` to fix); a note distinguishing a live "Permission denied" (wrong target/key) from a silent timeout (firewall block) since they mean different things; an explicit callout that a remote AI agent's SSH attempts being blocked is correct behavior, not a bug to route around. Step 2 — verify the target IP against the Hetzner Console directly rather than trusting docs. Step 3 — password/console recovery as a last resort: use "Reset Root Password" specifically (not "Enable rescue"), and documented the real VNC console keyboard bug found live (Shift+symbol keys silently typed as their unshifted equivalent — `+`→`=`, `_`→`-`, `"`→`'`, `>>`→`..`, `&&`→`77`, `~`→`` ` ``) plus workarounds (clipboard sidebar if present; otherwise do only alphanumeric input in the console and save symbol-heavy work for a real terminal). Closed with a "what's actually authorized right now" note pointing at `id_ed25519`, not the still-undone `hetzner_portfolio` key. Trimmed the shorter inline note added in M72 down to a pointer at this new section.
+  - Verification (real): This is documentation only — no code path to test. Content is a direct transcription of what was actually diagnosed and run live during M72 (firewall query/update commands were the exact ones executed against the real Hetzner API that session), not speculative.
+  - Risks / Limitations: The firewall ID (`11470214`) and current server IP are hardcoded in the examples — correct as of today, but will need updating if the firewall or server is ever recreated (same class of staleness that caused M72, now at least concentrated in one clearly-labeled section instead of scattered).
+  - Next Actions: None.
+
+---

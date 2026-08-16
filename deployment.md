@@ -166,11 +166,7 @@ curl -s -X POST "https://api.hetzner.cloud/v1/firewalls" \
 
 Verify: SSH still works, `curl http://$SERVER/` returns 200, `curl http://$SERVER:5000/` times out (blocked, correct).
 
-If your own IP changes (new location, VPN), update the rule's `source_ips` via `PUT /v1/firewalls/{id}/rules` or you'll lock yourself out of SSH.
-
-**If SSH suddenly starts rejecting a key/password that used to work, check this first** — before troubleshooting keys, passwords, or console access. On 2026-08-16 a stale `source_ips` entry (an old IP no longer in use) cost about two hours of unnecessary console/password debugging that a firewall check would have caught in under a minute. Get the server's current firewall rules with `GET https://api.hetzner.cloud/v1/firewalls/{firewall_id}` (Bearer `HETZNER_API_KEY`) and compare `source_ips` against your actual current IP (`curl -4 ifconfig.me`) before assuming the problem is on the server.
-
-Also, in practice the key actually authorized on this server has been Kes's regular default key (`~/.ssh/id_ed25519`), not a dedicated `hetzner_portfolio` key — the "One-time setup" section above describes the intended, more isolated setup, but no `hetzner_portfolio` key currently exists on Kes's machine. Worth doing properly (a server-specific key, so a compromised personal key doesn't also expose this server) next time SSH access is touched.
+If your own IP changes (new location, VPN), update the rule's `source_ips` via the Hetzner API or you'll lock yourself out of SSH. **See "Troubleshooting: Recovering SSH Access" below the first time this happens** — check the firewall before touching keys, passwords, or the console.
 
 ### 6. Build the production `.env`
 
@@ -281,6 +277,62 @@ docker compose exec postgres psql -U <user> -d <db>    # query the database
 docker compose down                                    # stop everything, keep volumes
 docker compose down -v                                 # stop AND wipe data — IRREVERSIBLE
 ```
+
+## Troubleshooting: Recovering SSH Access
+
+On 2026-08-16, SSH access broke and took roughly two hours to recover — almost entirely because the actual cause (a stale firewall rule) wasn't checked first, so time went into console keyboard workarounds and password resets that were never going to fix it. This section exists so that never happens again. **Read step 1 before doing anything else.**
+
+### Step 1: Check the firewall FIRST, always
+
+If `ssh root@$SERVER` (or `ssh deploy@$SERVER`) suddenly stops working — connection times out, or hangs — the firewall's IP allowlist has almost certainly gone stale. This is the #1 suspect, checked before anything else, every time:
+
+```bash
+curl -4 ifconfig.me    # your current IPv4 — the ONLY thing that changes on your end
+```
+
+Compare against what the firewall currently allows (needs `HETZNER_API_KEY` from `.env` — never print the key itself, only use it in the `Authorization` header):
+
+```bash
+curl -s https://api.hetzner.cloud/v1/firewalls/11470214 \
+  -H "Authorization: Bearer $HETZNER_API_KEY" | grep -A3 '"port": "22"'
+```
+
+If `source_ips` doesn't contain your current IP, that's the entire problem — nothing wrong with your key, your password, or the server. Fix it with one API call (replace `<YOUR_IP>`):
+
+```bash
+curl -s -X POST https://api.hetzner.cloud/v1/firewalls/11470214/actions/set_rules \
+  -H "Authorization: Bearer $HETZNER_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"rules": [
+    {"direction": "in", "protocol": "tcp", "port": "22", "source_ips": ["<YOUR_IP>/32"]},
+    {"direction": "in", "protocol": "tcp", "port": "80", "source_ips": ["0.0.0.0/0", "::/0"]}
+  ]}'
+```
+
+Wait ~15 seconds for `apply_firewall` to finish, then retry SSH with your normal key. This alone fixed the 2026-08-16 incident — no password, no console, no new key ever ended up being necessary.
+
+**Important distinction if Claude Code (or any other automation) is trying to SSH in and gets "Permission denied" or "Connection timed out":** a *live* "Permission denied" response (not a timeout) means the target answered but rejected the key/password — that's a different problem (wrong IP entirely, or wrong key) from a *timeout*, which means the firewall silently dropped the connection before SSH even started. Don't assume which one you're looking at — the error message tells you which branch of this troubleshooting guide applies. And a remote AI agent's SSH attempts will always be blocked by this firewall by design (it only trusts Kes's IP) — that's correct behavior, not a bug to route around by adding the agent's IP to the allowlist without a deliberate decision to do so.
+
+### Step 2: Also double-check you're targeting the right server
+
+Before assuming it's a firewall or key problem at all, confirm the IP you're using matches what the Hetzner Console shows for `ubuntu-4gb-hel1-1` right now (Console → Servers → the server row shows its current Public IP). Server IPs don't normally change on their own, but documentation can go stale — this repo's own `CLAUDE.md` had the wrong IP for a while (fixed 2026-08-16). If in doubt, trust the Hetzner Console over any doc, including this one.
+
+### Step 3 (only if the firewall is fine and the IP is right, and you still can't get in): password/console recovery
+
+Only reach for this if steps 1-2 didn't fix it — e.g. you've genuinely lost every key that's in `authorized_keys`.
+
+1. Hetzner Console → the server → **Rescue** tab → **"Reset Root Password"** button (the standalone one at the bottom of the tab, *not* "Enable rescue" / "Enable rescue & power cycle" above it — those boot into a separate recovery OS and require a reboot cycle; you don't need that just to log in with a password).
+2. This shows a one-time password on screen. Use it either:
+   - Over real SSH: `ssh root@$SERVER`, enter the password when prompted. **Password auth over SSH may be restricted for root** (`PermitRootLogin prohibit-password` is a common Ubuntu cloud-image default) — if this rejects a password you're sure is correct, that's why; go to the console instead.
+   - Via the Hetzner Console's browser-based VNC terminal (Console button on the server's Overview page): log in as `root` with that password.
+3. **The VNC console has a real keyboard bug**: any character that requires Shift on a US keyboard (`+ _ ~ > < & | " ! @ # $ % ^ * ( ) :`) gets silently typed as its *unshifted* equivalent instead — `+` becomes `=`, `_` becomes `-`, `"` becomes `'`, `>>` becomes `..`, `&&` becomes `77`, `~` becomes `` ` ``. Letters (including uppercase) and digits type fine; only shifted symbols break. This makes typing shell syntax or SSH key content directly into that console unreliable.
+   - If the console has a clipboard/extra-keys sidebar (a small arrow tab on the console window's edge), paste through that — it's more likely to preserve exact characters than physical keystroke simulation.
+   - Otherwise, do the least possible inside the console: just get a password set (`passwd`, alphanumeric-only, since digits/letters type correctly) and reserve anything symbol-heavy (adding SSH keys, editing config files) for a real SSH/terminal session once you're back in over the network — real terminals don't have this bug.
+4. Once logged in one way or another, get back to key-based access and re-lock password auth down (or at minimum, rotate the password again) rather than leaving password auth as the ongoing access method.
+
+### Reference: what's actually authorized right now
+
+Despite `deployment.md`'s "One-time setup" section describing a dedicated `hetzner_portfolio` key as the intended setup, in practice `~/.ssh/id_ed25519` (Kes's regular default key) is what's authorized on the server as of 2026-08-16. No `hetzner_portfolio` key currently exists on Kes's machine. Worth actually doing the dedicated-key setup next time SSH access is touched, so a compromised personal key doesn't also expose this server — but don't assume it's already done.
 
 ## Backups
 
