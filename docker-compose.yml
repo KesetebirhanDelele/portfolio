@@ -86,14 +86,19 @@ services:
   # Also host-networked — the same reason as backend: it reverse-proxies
   # /api/* to http://127.0.0.1:5000 (nginx.conf), which only resolves to
   # the backend under host networking, not a Docker bridge network.
-  # Publicly reachable on the host's port 80 (Hetzner Firewall gates this,
-  # not Compose) since there's no domain/TLS yet — see deployment.md.
+  # Publicly reachable on the host's ports 80/443 (Hetzner Firewall gates
+  # this, not Compose). TLS terminates here via a nip.io Let's Encrypt cert
+  # (deployment.md's TLS stopgap, 2026-08-16) — certs live on the host at
+  # /etc/letsencrypt (certbot manages renewal there) and are mounted
+  # read-only so a container rebuild never needs to bake in cert material.
   frontend:
     build:
       context: ./frontend
       args:
         VITE_API_BASE_URL: ""
     network_mode: host
+    volumes:
+      - /etc/letsencrypt:/etc/letsencrypt:ro
     depends_on:
       - backend
     restart: unless-stopped
