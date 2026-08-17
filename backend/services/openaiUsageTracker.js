@@ -60,7 +60,8 @@ async function getUsageSummary() {
     pool.query(
       `SELECT COALESCE(SUM(total_tokens), 0)::bigint AS total_tokens,
               COUNT(*)::int AS total_calls,
-              COUNT(*) FILTER (WHERE outcome = 'failure')::int AS failed_calls
+              COUNT(*) FILTER (WHERE outcome = 'failure')::int AS failed_calls,
+              COUNT(*) FILTER (WHERE outcome = 'failure' AND created_at >= NOW() - INTERVAL '24 hours')::int AS failed_calls_24h
        FROM openai_usage_events`
     ),
     pool.query(
@@ -72,6 +73,7 @@ async function getUsageSummary() {
     totalTokensUsed: Number(totals.rows[0].total_tokens),
     totalCalls: totals.rows[0].total_calls,
     failedCalls: totals.rows[0].failed_calls,
+    failedCallsLast24h: totals.rows[0].failed_calls_24h,
     byCallType: byType.rows.map(r => ({ callType: r.call_type, tokens: Number(r.tokens), calls: r.calls })),
   };
 }

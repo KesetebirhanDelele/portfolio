@@ -15,11 +15,19 @@ const router = express.Router();
 
 router.get('/stats', authMiddleware, requireAdmin, async (req, res) => {
   try {
-    const [repos, users, portfolios, deepStatus, analysisStatus, recentFailures, tokens, queueCounts, failedJobs, openaiUsage] = await Promise.all([
+    const [repos, users, portfolios, deepStatus, deepFailed24h, analysisStatus, recentFailures, tokens, queueCounts, failedJobs, openaiUsage] = await Promise.all([
       pool.query('SELECT provider, COUNT(*)::int AS count FROM repositories GROUP BY provider'),
       pool.query("SELECT role, COUNT(*)::int AS count FROM users WHERE deleted_at IS NULL GROUP BY role"),
       pool.query('SELECT COUNT(*)::int AS count FROM portfolios'),
       pool.query('SELECT status, COUNT(*)::int AS count FROM deep_analyses GROUP BY status'),
+      // byStatus above is all-time (needed for Completed/Running/Queued, which
+      // are current-state counts, not "since when" ones) — Failed specifically
+      // also gets a 24h-scoped count so the dashboard can highlight only
+      // recent breakage instead of staying red forever over one old failure.
+      pool.query(
+        `SELECT COUNT(*)::int AS count FROM deep_analyses
+         WHERE status = 'failed' AND created_at >= NOW() - INTERVAL '24 hours'`
+      ),
       pool.query('SELECT status, COUNT(*)::int AS count FROM analyses GROUP BY status'),
       // phase_errors_json (not the never-written error_message column — see
       // PROGRESS.md M66.1) holds the real per-phase failure detail:
@@ -56,6 +64,7 @@ router.get('/stats', authMiddleware, requireAdmin, async (req, res) => {
         portfolios: { total: portfolios.rows[0].count },
         deepAnalyses: {
           byStatus: deepStatus.rows,
+          failedLast24h: deepFailed24h.rows[0].count,
           recentFailures: recentFailures.rows.map(f => ({
             id: f.id,
             repositoryId: f.repository_id,
@@ -66,6 +75,10 @@ router.get('/stats', authMiddleware, requireAdmin, async (req, res) => {
           totalTokensUsed: Number(tokens.rows[0].total),
         },
         analyses: { byStatus: analysisStatus.rows },
+        // queueCounts.failed is already effectively a 24h count, not
+        // all-time — heavyTaskQueue.js's RETENTION.removeOnFail purges
+        // failed jobs after exactly 86400s, so nothing older ever survives
+        // in Redis to be counted. No separate query needed here.
         heavyTaskQueue: {
           ...queueCounts,
           recentFailures: failedJobs.map(job => ({
@@ -80,6 +93,7 @@ router.get('/stats', authMiddleware, requireAdmin, async (req, res) => {
           totalTokensUsed: openaiUsage.totalTokensUsed,
           totalCalls: openaiUsage.totalCalls,
           failedCalls: openaiUsage.failedCalls,
+          failedCallsLast24h: openaiUsage.failedCallsLast24h,
           byCallType: openaiUsage.byCallType,
         },
         systemHealth: {
@@ -96,6 +110,7 @@ router.get('/stats', authMiddleware, requireAdmin, async (req, res) => {
           'deepAnalyses.totalTokensUsed is correctly 0 — the six-phase deep-analysis pipeline (phaseTracker.js/deepAnalysisPipeline.js) makes zero LLM calls by design. contentGeneration.totalTokensUsed covers the app\'s actual LLM dependency (OpenAI, via services/openai.js): narrative, README, project-description, and case-study generation.',
           "analyses (the basic, non-deep pipeline) has no per-failure error detail stored anywhere yet — would need a schema addition to drill into.",
           'systemHealth and latency are in-memory and self-reported — both reset on backend restart, and systemHealth cannot detect the case where the backend process itself is fully down.',
+          'Failed counts are 24h-scoped, not all-time: deepAnalyses.failedLast24h and contentGeneration.failedCallsLast24h are explicit queries; heavyTaskQueue.failed is already 24h in practice because BullMQ purges failed jobs after exactly 86400s (see heavyTaskQueue.js RETENTION). byStatus.failed and contentGeneration.failedCalls remain all-time totals for reference.',
         ],
       },
     });
