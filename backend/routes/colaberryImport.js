@@ -221,6 +221,15 @@ router.post('/', authMiddleware, heavyOperationLimiter, async (req, res) => {
     });
   } catch (err) {
     console.error('[colaberry-import] error:', err.message);
+    // 'SESSION_EXPIRED:' prefix, not err.code — see colaberryProjectScraper.js's
+    // isSessionValid comment for why (the error crosses the heavy-task
+    // queue's BullMQ boundary, which only preserves err.message).
+    if (err.message.startsWith('SESSION_EXPIRED:')) {
+      return res.status(401).json({
+        success: false,
+        error: { code: 'SESSION_EXPIRED', message: err.message.replace(/^SESSION_EXPIRED:\s*/, '') },
+      });
+    }
     return res.status(500).json({ success: false, error: { code: 'SERVER_ERROR', message: err.message } });
   }
 });

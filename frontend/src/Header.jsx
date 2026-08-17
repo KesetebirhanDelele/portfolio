@@ -373,6 +373,51 @@ function Header({ onLogout }) {
     setSelectedNetworkLinks(prev => prev.includes(link) ? prev.filter(l => l !== link) : [...prev, link])
   }
 
+  // Shared by three entry points: selecting projects and continuing,
+  // "Skip — import my own", and ColaberryLiveLogin's onComplete (after a
+  // fresh login). Tries the import directly first — the backend already
+  // reuses a stored Colaberry session if one exists, so most of the time
+  // this succeeds without ever showing the live-login modal at all. Only
+  // falls back to live-login when the backend reports NOT_CONNECTED (no
+  // stored session yet) or SESSION_EXPIRED (stored session's Colaberry
+  // cookies have actually gone stale) — previously this modal showed
+  // unconditionally on every attempt, which read as "getting logged out"
+  // every few minutes even though the stored session was often still fine.
+  async function runColaberryImport(links) {
+    setShowColaberryLogin(false)
+    setColaberryBanner('Importing your Colaberry projects…')
+    try {
+      const res = await authFetch(`${BASE_URL}/api/colaberry-import`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(links.length > 0 ? { projectLinks: links } : {}),
+      })
+      const body = res ? await res.json() : null
+      const code = body?.error?.code
+      if (code === 'NOT_CONNECTED' || code === 'SESSION_EXPIRED') {
+        setColaberryLinksToImport(links)
+        setColaberryBanner(null)
+        setShowColaberryLogin(true)
+        return
+      }
+      if (!body?.success && body?.data?.imported?.length === 0 && body?.data?.failed?.length === 0) {
+        setColaberryBanner('Connected — no Colaberry projects found for your account.')
+      } else if (!body?.success) {
+        setColaberryBanner(`Import failed: ${body?.error?.message || 'Unknown error.'}`)
+      } else {
+        const { imported, failed } = body.data
+        setColaberryBanner(
+          `Imported ${imported.length} Colaberry project${imported.length === 1 ? '' : 's'}` +
+          (failed?.length ? ` (${failed.length} failed)` : '') + '.'
+        )
+        setAnalyzingFullNames(prev => new Set([...prev, ...imported.map(p => p.title)]))
+        fetchImportedReposAndMaybeAutoImport()
+      }
+    } catch (err) {
+      setColaberryBanner(`Import failed: ${err.message}`)
+    }
+  }
+
   async function handleStopAnalysis() {
     await authFetch(`${BASE_URL}/api/deep-analysis/cancel-pending`, { method: 'POST' }, onLogout)
     setAnalyzingFullNames(new Set())
@@ -966,12 +1011,6 @@ function Header({ onLogout }) {
               const handleContinue = () => {
                 const pastedLinks = colaberryLinksInput.split('\n').map(l => l.trim()).filter(Boolean)
                 const combined = [...new Set([...selectedNetworkLinks, ...pastedLinks])]
-                if (combined.length === 0) {
-                  setColaberryLinksToImport([])
-                  setShowColaberryLinksPrompt(false)
-                  setShowColaberryLogin(true)
-                  return
-                }
                 if (combined.length > 10) {
                   setColaberryLinksError(`You've selected ${combined.length} projects — up to 10 at a time. Remove ${combined.length - 10} to continue.`)
                   return
@@ -984,7 +1023,7 @@ function Header({ onLogout }) {
                 setColaberryLinksError('')
                 setColaberryLinksToImport(combined)
                 setShowColaberryLinksPrompt(false)
-                setShowColaberryLogin(true)
+                runColaberryImport(combined)
               }
 
               return (
@@ -1136,7 +1175,7 @@ function Header({ onLogout }) {
                           onClick={() => {
                             setColaberryLinksToImport([])
                             setShowColaberryLinksPrompt(false)
-                            setShowColaberryLogin(true)
+                            runColaberryImport([])
                           }}
                           className="px-4 py-2 rounded-xl text-sm font-semibold text-indigo-600 hover:bg-indigo-50 transition"
                         >
@@ -1157,33 +1196,7 @@ function Header({ onLogout }) {
 
             {showColaberryLogin && (
               <ColaberryLiveLogin
-                onComplete={async () => {
-                  setShowColaberryLogin(false)
-                  setColaberryBanner('Colaberry account connected — importing your projects…')
-                  try {
-                    const res = await authFetch(`${BASE_URL}/api/colaberry-import`, {
-                      method: 'POST',
-                      headers: { 'Content-Type': 'application/json' },
-                      body: JSON.stringify(colaberryLinksToImport.length > 0 ? { projectLinks: colaberryLinksToImport } : {}),
-                    })
-                    const body = res ? await res.json() : null
-                    if (!body?.success && body?.data?.imported?.length === 0 && body?.data?.failed?.length === 0) {
-                      setColaberryBanner('Connected — no Colaberry projects found for your account.')
-                    } else if (!body?.success) {
-                      setColaberryBanner(`Import failed: ${body?.error?.message || 'Unknown error.'}`)
-                    } else {
-                      const { imported, failed } = body.data
-                      setColaberryBanner(
-                        `Imported ${imported.length} Colaberry project${imported.length === 1 ? '' : 's'}` +
-                        (failed?.length ? ` (${failed.length} failed)` : '') + '.'
-                      )
-                      setAnalyzingFullNames(prev => new Set([...prev, ...imported.map(p => p.title)]))
-                      fetchImportedReposAndMaybeAutoImport()
-                    }
-                  } catch (err) {
-                    setColaberryBanner(`Import failed: ${err.message}`)
-                  }
-                }}
+                onComplete={() => runColaberryImport(colaberryLinksToImport)}
                 onCancel={() => setShowColaberryLogin(false)}
               />
             )}
