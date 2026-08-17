@@ -49,8 +49,14 @@ function ColaberryLiveLogin({ onComplete, onCancel }) {
         sessionRef.current = body.data
         setStatus('connecting')
 
-        const wsProtocol = BASE_URL.startsWith('https') ? 'wss' : 'ws'
-        const wsHost = BASE_URL.replace(/^https?:\/\//, '')
+        // BASE_URL is '' in production (same-origin API calls via nginx's
+        // proxy — see docker-compose.yml's VITE_API_BASE_URL build arg), so
+        // deriving protocol/host from it produced a malformed ws:// URL with
+        // no host — invisible until the page was actually served over HTTPS,
+        // at which point browsers block it outright as mixed content. Fall
+        // back to the page's own origin, same as any same-origin app would.
+        const wsProtocol = (BASE_URL ? BASE_URL.startsWith('https') : window.location.protocol === 'https:') ? 'wss' : 'ws'
+        const wsHost = BASE_URL ? BASE_URL.replace(/^https?:\/\//, '') : window.location.host
         const streamUrl = `${wsProtocol}://${wsHost}/api/colaberry-login/${body.data.sessionId}/stream?token=${encodeURIComponent(body.data.token)}`
 
         const rfb = new RFB(canvasContainerRef.current, streamUrl)
@@ -159,7 +165,7 @@ function ColaberryLiveLogin({ onComplete, onCancel }) {
           </p>
         </div>
 
-        <div className="bg-black flex items-center justify-center" style={{ minHeight: 480 }}>
+        <div className="bg-black flex items-center justify-center relative" style={{ minHeight: 480 }}>
           {(status === 'starting' || status === 'connecting') && (
             <p className="text-gray-400 text-sm">
               {status === 'starting' ? 'Starting your secure browser session…' : 'Connecting to the live browser…'}
@@ -176,10 +182,19 @@ function ColaberryLiveLogin({ onComplete, onCancel }) {
               </button>
             </div>
           )}
+          {/* Stays in real layout (never display:none) even before connecting —
+              noVNC measures this container's size once, when the RFB object is
+              constructed (while status is still 'connecting'), and never
+              re-measures afterward. A display:none container at that moment
+              means noVNC creates its canvas at 0x0 permanently; toggling
+              display to 'block' later doesn't trigger a resize. visibility
+              keeps real dimensions available from the start; absolute
+              positioning keeps it from disturbing the status text's layout
+              while hidden. */}
           <div
             ref={canvasContainerRef}
-            className="w-full"
-            style={{ display: status === 'connected' || status === 'completing' ? 'block' : 'none' }}
+            className="w-full h-full absolute inset-0"
+            style={{ visibility: status === 'connected' || status === 'completing' ? 'visible' : 'hidden' }}
           />
         </div>
 

@@ -98,6 +98,26 @@ async function scrapeSteps(page, stepUrl) {
   return { stepByStepContent, allStepDetails };
 }
 
+// A stale/expired Colaberry cookie in the stored storageState silently
+// redirects any authenticated-page navigation to Colaberry's own login
+// page instead of throwing — Playwright's navigation itself succeeds, so
+// nothing here fails loudly on its own. A password input is a reliable,
+// URL-pattern-agnostic signal that we landed on a login form rather than
+// real content, regardless of Colaberry's exact login route.
+//
+// Checked against the actual first URL in this request's batch (not a
+// generic catalog page) — confirmed live (2026-08-17) that Colaberry's
+// generic /app/network catalog root renders fully with zero session at
+// all, so checking against it would silently report "valid" for a
+// genuinely dead session. The real per-project pages are the actual
+// content being scraped either way, so that's the only meaningful thing to
+// check against.
+async function isSessionValid(page, checkUrl) {
+  await page.goto(checkUrl, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT_MS });
+  const passwordFieldCount = await page.locator('input[type="password"]').count();
+  return passwordFieldCount === 0;
+}
+
 async function scrapeSingleProject(page, projectUrl) {
   await page.goto(projectUrl, { waitUntil: 'load', timeout: NAV_TIMEOUT_MS });
 
@@ -127,12 +147,31 @@ async function scrapeSingleProject(page, projectUrl) {
 // Returns { succeeded: [...], failed: [{ url, error }] } — one bad project link
 // never aborts the rest of the batch (Failure-First Design).
 async function scrapeColaberryProjects(storageState, projectUrls) {
-  const browser = await chromium.launch({ headless: true });
+  // --no-sandbox: Chromium's own internal sandbox needs host capabilities
+  // Docker containers don't grant by default — same tradeoff pdfGenerator.js
+  // already makes for Puppeteer. The container itself is the isolation
+  // boundary, and this only ever navigates to Colaberry's own domain.
+  const browser = await chromium.launch({ headless: true, args: ['--no-sandbox'] });
   const succeeded = [];
   const failed = [];
   try {
     const context = await browser.newContext({ storageState });
     const page = await context.newPage();
+
+    // Check once, up front — if the session is stale, every URL in the
+    // batch would fail the same way, so there's no point burning a
+    // Playwright navigation per project just to discover that N times over.
+    // The 'SESSION_EXPIRED:' prefix (not a thrown error's .code) is
+    // deliberate: this error crosses heavyTaskQueue.js's BullMQ queue
+    // boundary, which serializes job failures via job.failedReason = err.message
+    // only (confirmed by reading node_modules/bullmq/dist/cjs/classes/job.js —
+    // waitUntilFinished's onFailed does `reject(new Error(args.failedReason))`,
+    // discarding any custom error properties like .code). A message prefix
+    // is the only signal guaranteed to survive that boundary intact.
+    if (!(await isSessionValid(page, projectUrls[0]))) {
+      throw new Error('SESSION_EXPIRED: Your Colaberry session has expired — log in again to continue.');
+    }
+
     for (const url of projectUrls) {
       try {
         succeeded.push(await scrapeSingleProject(page, url));

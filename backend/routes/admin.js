@@ -7,12 +7,15 @@ const pool = require('../db/postgres');
 const authMiddleware = require('../middleware/authMiddleware');
 const requireAdmin = require('../middleware/requireAdmin');
 const { queue } = require('../services/heavyTaskQueue');
+const healthMonitor = require('../services/healthMonitor');
+const latencyTracker = require('../services/latencyTracker');
+const { getUsageSummary: getOpenAIUsageSummary } = require('../services/openaiUsageTracker');
 
 const router = express.Router();
 
 router.get('/stats', authMiddleware, requireAdmin, async (req, res) => {
   try {
-    const [repos, users, portfolios, deepStatus, analysisStatus, recentFailures, tokens, queueCounts, failedJobs] = await Promise.all([
+    const [repos, users, portfolios, deepStatus, analysisStatus, recentFailures, tokens, queueCounts, failedJobs, openaiUsage] = await Promise.all([
       pool.query('SELECT provider, COUNT(*)::int AS count FROM repositories GROUP BY provider'),
       pool.query("SELECT role, COUNT(*)::int AS count FROM users WHERE deleted_at IS NULL GROUP BY role"),
       pool.query('SELECT COUNT(*)::int AS count FROM portfolios'),
@@ -34,7 +37,15 @@ router.get('/stats', authMiddleware, requireAdmin, async (req, res) => {
       // are designed to never put secrets in job data (see its header
       // comment), only non-secret references like userId/analysisId/owner.
       queue.getFailed(0, 9),
+      getOpenAIUsageSummary(),
     ]);
+
+    // Self-reported, in-memory (healthMonitor.js/latencyTracker.js) — both
+    // reset on backend restart by design. See deployment.md for the
+    // tradeoff (self-reported vs. an external synthetic pinger).
+    const uptime = healthMonitor.getUptimeSummary();
+    const latestHealth = healthMonitor.getLatestResult();
+    const latency = latencyTracker.getSummary();
 
     return res.status(200).json({
       success: true,
@@ -65,9 +76,26 @@ router.get('/stats', authMiddleware, requireAdmin, async (req, res) => {
             finishedOn: job.finishedOn ? new Date(job.finishedOn).toISOString() : null,
           })),
         },
+        contentGeneration: {
+          totalTokensUsed: openaiUsage.totalTokensUsed,
+          totalCalls: openaiUsage.totalCalls,
+          failedCalls: openaiUsage.failedCalls,
+          byCallType: openaiUsage.byCallType,
+        },
+        systemHealth: {
+          status: latestHealth?.status ?? null,
+          checks: latestHealth?.checks ?? null,
+          checkedAt: latestHealth?.timestamp ?? null,
+          uptimePercent1h: uptime.uptimePercent1h,
+          uptimePercent24h: uptime.uptimePercent24h,
+          sampleCount: uptime.sampleCount,
+          monitoringSince: uptime.since,
+        },
+        latency: latency,
         notes: [
-          'totalTokensUsed only covers the deep-analysis pipeline — narrative, project-description, and case-study generation calls are not yet token-tracked.',
+          'deepAnalyses.totalTokensUsed is correctly 0 — the six-phase deep-analysis pipeline (phaseTracker.js/deepAnalysisPipeline.js) makes zero LLM calls by design. contentGeneration.totalTokensUsed covers the app\'s actual LLM dependency (OpenAI, via services/openai.js): narrative, README, project-description, and case-study generation.',
           "analyses (the basic, non-deep pipeline) has no per-failure error detail stored anywhere yet — would need a schema addition to drill into.",
+          'systemHealth and latency are in-memory and self-reported — both reset on backend restart, and systemHealth cannot detect the case where the backend process itself is fully down.',
         ],
       },
     });

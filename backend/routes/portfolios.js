@@ -3,9 +3,10 @@ const multer    = require('multer');
 const pdfjsLib  = require('pdfjs-dist/legacy/build/pdf.js');
 const pool = require('../db/postgres');
 const authMiddleware = require('../middleware/authMiddleware');
-const { generationLimiter } = require('../middleware/rateLimiter');
+const { generationLimiter, heavyOperationLimiter } = require('../middleware/rateLimiter');
 const { generatePortfolioNarrative, extractLinkedInProfile, generateProjectDescription, generateProjectCaseStudy, CASE_STUDY_PROMPT_VERSION } = require('../services/openai');
 const { generatePortfolioPdf } = require('../services/pdfGenerator');
+const { registerHeavyTaskHandler, runHeavyTask } = require('../services/heavyTaskQueue');
 const { TECH_CATEGORIES, TECH_LABELS } = require('../services/techMaps');
 const { publishPortfolioAsGithubRepo } = require('../services/githubPortfolioPublisher');
 const { getGithubInfo } = require('../services/githubTokenResolver');
@@ -299,8 +300,34 @@ router.get('/public/:slug', async (req, res) => {
   }
 });
 
+// generatePortfolioPdf launches a real headless Chromium (Puppeteer) per
+// call — previously invoked directly on the request path with no
+// concurrency cap of any kind, unlike the other two Chromium/Playwright
+// paths in this app (Colaberry scraping, deep analysis), both of which
+// already go through heavyTaskQueue.js specifically to prevent unbounded
+// concurrent browser launches on a 2-vCPU/4GB host. This route is also
+// public and unauthenticated, so it was reachable by anyone (or any
+// crawler) with no rate limit either — the single biggest concurrency risk
+// in the app until fixed. Job data here (title, narrative text, tech
+// skills, repo names, resume summary) is exactly the public portfolio
+// content already about to be sent to the requester as a PDF — not
+// secret/session state, unlike the Colaberry live-login job data
+// heavyTaskQueue.js's header comment warns about.
+// Return value crosses the queue boundary via BullMQ's JSON.stringify/parse
+// (heavyTaskQueue.js's job.waitUntilFinished) — a raw Buffer would come
+// back as {type:'Buffer', data:[...]} with every byte listed as a separate
+// JSON number, so base64-encode here and decode on the route side instead.
+registerHeavyTaskHandler('portfolio-pdf', async pdfInput => {
+  const pdfData = await generatePortfolioPdf(pdfInput);
+  // page.pdf() (Puppeteer) returns a Uint8Array here, not a Node Buffer —
+  // Uint8Array.prototype.toString silently ignores a 'base64' argument and
+  // falls back to Array.prototype.toString's comma-joined decimal list.
+  // Buffer.from() copies either a real Buffer or a Uint8Array correctly.
+  return Buffer.from(pdfData).toString('base64');
+});
+
 // GET /api/portfolios/public/:slug/pdf — generate and return a PDF resume (no auth)
-router.get('/public/:slug/pdf', async (req, res) => {
+router.get('/public/:slug/pdf', heavyOperationLimiter, async (req, res) => {
   const { slug } = req.params;
 
   try {
@@ -359,7 +386,13 @@ router.get('/public/:slug/pdf', async (req, res) => {
       codeIntelligence: r.code_intelligence_json || null,
     }));
 
-    const pdfBuffer = await generatePortfolioPdf({
+    // Routed through the heavy-task queue (Tier 2) so concurrent PDF
+    // requests can't launch unbounded Chromium instances on the host — see
+    // the registerHeavyTaskHandler comment above. Shorter timeout than the
+    // queue's 10-minute default: this is a synchronous request a browser is
+    // waiting on, not a background job — a few seconds normally, capped at
+    // 60s even if queued behind another heavy operation.
+    const pdfBase64 = await runHeavyTask('portfolio-pdf', {
       title:          portfolio.title,
       headline:       narrative.headline   || null,
       narrative:      narrative.narrative  || null,
@@ -373,7 +406,8 @@ router.get('/public/:slug/pdf', async (req, res) => {
       education:      linkedin.education   || [],
       certifications: linkedin.certifications || [],
       resumeSummary:  linkedin.summary || null,
-    });
+    }, { timeoutMs: 60 * 1000 });
+    const pdfBuffer = Buffer.from(pdfBase64, 'base64');
 
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `attachment; filename="${slug}-resume.pdf"`);

@@ -1,4 +1,5 @@
 const OpenAI = require('openai');
+const { trackOpenAICall } = require('./openaiUsageTracker');
 
 // Explicit timeout (observability Tier 1) — previously unset, so a hung
 // OpenAI request had no bound short of the SDK's own 10-minute default,
@@ -60,7 +61,7 @@ ${readme}`;
 }
 
 async function analyzeRepository(repo) {
-  const response = await openai.chat.completions.create({
+  const response = await trackOpenAICall('analyzeRepository', 'gpt-4o-mini', () => openai.chat.completions.create({
     model: 'gpt-4o-mini',
     response_format: { type: 'json_object' },
     messages: [
@@ -69,7 +70,7 @@ async function analyzeRepository(repo) {
     ],
     temperature: 0.3,
     max_tokens: 1500,
-  });
+  }));
 
   const raw = response.choices[0].message.content;
   return JSON.parse(raw);
@@ -252,7 +253,7 @@ ${projectRows}`;
 }
 
 async function generatePortfolioNarrative(analyses) {
-  const response = await openai.chat.completions.create({
+  const response = await trackOpenAICall('generatePortfolioNarrative', 'gpt-4o-mini', () => openai.chat.completions.create({
     model: 'gpt-4o-mini',
     response_format: { type: 'json_object' },
     messages: [
@@ -261,7 +262,7 @@ async function generatePortfolioNarrative(analyses) {
     ],
     temperature: 0.5,
     max_tokens: 3000,
-  });
+  }));
 
   const raw = response.choices[0].message.content;
   const result = JSON.parse(raw);
@@ -366,7 +367,7 @@ ${mediaSection}`;
 }
 
 async function generateReadme(repo, analysis, mediaUrls = []) {
-  const response = await openai.chat.completions.create({
+  const response = await trackOpenAICall('generateReadme', 'gpt-4o', () => openai.chat.completions.create({
     model: 'gpt-4o',
     messages: [
       { role: 'system', content: README_SYSTEM_PROMPT },
@@ -374,7 +375,7 @@ async function generateReadme(repo, analysis, mediaUrls = []) {
     ],
     temperature: 0.3,
     max_tokens: 2500,
-  });
+  }));
 
   return response.choices[0].message.content.trim();
 }
@@ -428,7 +429,7 @@ Return ONLY valid JSON with this exact structure:
 async function extractLinkedInProfile(rawText) {
   // Truncate to ~6000 chars to stay within token limits — LinkedIn PDFs are typically 2–5K chars
   const text = rawText.slice(0, 6000);
-  const response = await openai.chat.completions.create({
+  const response = await trackOpenAICall('extractLinkedInProfile', 'gpt-4o-mini', () => openai.chat.completions.create({
     model: 'gpt-4o-mini',
     response_format: { type: 'json_object' },
     messages: [
@@ -437,7 +438,7 @@ async function extractLinkedInProfile(rawText) {
     ],
     temperature: 0.1,
     max_tokens: 1500,
-  });
+  }));
   return JSON.parse(response.choices[0].message.content);
 }
 
@@ -479,7 +480,7 @@ async function generateProjectDescription({
     patternsInferred?.length   ? `Engineering patterns: ${patternsInferred.slice(0, 4).join('; ')}` : null,
   ].filter(Boolean).join('\n');
 
-  const response = await openai.chat.completions.create({
+  const response = await trackOpenAICall('generateProjectDescription', 'gpt-4o-mini', () => openai.chat.completions.create({
     model: 'gpt-4o-mini',
     response_format: { type: 'json_object' },
     messages: [
@@ -488,7 +489,7 @@ async function generateProjectDescription({
     ],
     temperature: 0.4,
     max_tokens: 600,
-  });
+  }));
   const raw = JSON.parse(response.choices[0].message.content);
   return typeof raw.description === 'string' ? raw.description : '';
 }
@@ -580,7 +581,7 @@ async function generateProjectCaseStudy({
 
   if (!input.trim()) return null;
 
-  const response = await openai.chat.completions.create({
+  const response = await trackOpenAICall('generateProjectCaseStudy', 'gpt-4o-mini', () => openai.chat.completions.create({
     model: 'gpt-4o-mini',
     response_format: { type: 'json_object' },
     messages: [
@@ -589,7 +590,7 @@ async function generateProjectCaseStudy({
     ],
     temperature: 0.3,
     max_tokens: 900,
-  });
+  }));
 
   const raw = JSON.parse(response.choices[0].message.content);
   const toArray = v => Array.isArray(v) ? v.filter(x => typeof x === 'string' && x.trim()) : [];
@@ -611,4 +612,8 @@ async function generateProjectCaseStudy({
   return caseStudy;
 }
 
-module.exports = { analyzeRepository, generatePortfolioNarrative, generateReadme, extractLinkedInProfile, generateProjectDescription, generateProjectCaseStudy, CASE_STUDY_PROMPT_VERSION };
+module.exports = {
+  analyzeRepository, generatePortfolioNarrative, generateReadme, extractLinkedInProfile,
+  generateProjectDescription, generateProjectCaseStudy, CASE_STUDY_PROMPT_VERSION,
+  openaiClient: openai, // exposed read-only for healthChecks.js's connectivity probe (models.list — no token cost)
+};

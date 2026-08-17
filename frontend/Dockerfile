@@ -1,0 +1,18 @@
+# Empty by default: nginx reverse-proxies /api/* to the backend on the same
+# origin, so a relative path works whether this ends up behind a raw IP or a
+# domain — no rebuild needed if that changes later. See src/api.js.
+ARG VITE_API_BASE_URL=""
+
+FROM node:20-slim AS build
+WORKDIR /app
+COPY package.json package-lock.json ./
+RUN npm ci
+COPY . .
+ARG VITE_API_BASE_URL
+ENV VITE_API_BASE_URL=${VITE_API_BASE_URL}
+RUN npm run build
+
+FROM nginx:1.27-alpine
+COPY --from=build /app/dist /usr/share/nginx/html
+COPY nginx.conf /etc/nginx/conf.d/default.conf
+EXPOSE 80

@@ -32,6 +32,64 @@ function sumCounts(rows) {
   return (rows || []).reduce((total, r) => total + Number(r.count || 0), 0)
 }
 
+function fmtPct(v) {
+  return v === null || v === undefined ? '—' : `${v.toFixed(1)}%`
+}
+
+function fmtMs(v) {
+  return v === null || v === undefined ? '—' : `${v}ms`
+}
+
+const DEP_LABELS = { postgres: 'Postgres', redis: 'Redis', colaberryMssql: 'Colaberry SQL', openai: 'OpenAI' }
+
+function HealthChecksPanel({ checks }) {
+  if (!checks) {
+    return <div className="px-4 py-3 text-sm text-gray-400 rounded-xl border border-gray-200 bg-white">No health sample yet.</div>
+  }
+  return (
+    <div className="rounded-xl border border-gray-200 bg-white shadow-sm divide-y divide-gray-100">
+      {Object.entries(checks).map(([name, c]) => (
+        <div key={name} className="px-4 py-3 text-sm flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <span className={`w-2 h-2 rounded-full ${c.status === 'up' ? 'bg-emerald-500' : 'bg-red-500'}`} />
+            <span className="font-medium text-gray-800">{DEP_LABELS[name] || name}</span>
+          </div>
+          <div className="text-xs text-gray-400">
+            {c.status === 'up' ? `${c.latencyMs}ms` : (c.error || 'down')}
+          </div>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+function LatencyPanel({ latency }) {
+  const rows = Object.entries(latency?.byRouteGroup || {}).sort((a, b) => (b[1].count || 0) - (a[1].count || 0))
+  if (rows.length === 0) {
+    return <div className="px-4 py-3 text-sm text-gray-400 rounded-xl border border-gray-200 bg-white">No request samples yet.</div>
+  }
+  return (
+    <div className="rounded-xl border border-gray-200 bg-white shadow-sm divide-y divide-gray-100 overflow-x-auto">
+      <div className="px-4 py-2 text-xs font-semibold text-gray-400 flex gap-4 min-w-[420px]">
+        <span className="flex-1">Route</span>
+        <span className="w-16 text-right">p50</span>
+        <span className="w-16 text-right">p95</span>
+        <span className="w-16 text-right">p99</span>
+        <span className="w-16 text-right">n</span>
+      </div>
+      {rows.map(([route, s]) => (
+        <div key={route} className="px-4 py-2 text-sm flex gap-4 min-w-[420px]">
+          <span className="flex-1 font-mono text-gray-700 truncate">{route}</span>
+          <span className="w-16 text-right text-gray-600">{fmtMs(s.p50)}</span>
+          <span className="w-16 text-right text-gray-600">{fmtMs(s.p95)}</span>
+          <span className="w-16 text-right text-gray-600">{fmtMs(s.p99)}</span>
+          <span className="w-16 text-right text-gray-400">{s.count}</span>
+        </div>
+      ))}
+    </div>
+  )
+}
+
 function DeepAnalysisFailurePanel({ failures }) {
   if (failures.length === 0) {
     return <div className="px-4 py-3 text-sm text-gray-400 rounded-xl border border-gray-200 bg-white">No deep-analysis failures.</div>
@@ -95,7 +153,7 @@ function AdminStats({ onLogout }) {
   const [stats, setStats] = useState(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
-  const [expandedPanel, setExpandedPanel] = useState(null) // 'deepAnalysisFailures' | 'queueFailures' | null
+  const [expandedPanel, setExpandedPanel] = useState(null) // 'deepAnalysisFailures' | 'queueFailures' | 'healthChecks' | 'latency' | null
 
   useEffect(() => {
     load()
@@ -159,8 +217,51 @@ function AdminStats({ onLogout }) {
                 <StatCard label="Users" value={sumCounts(stats.users.byRole)}
                   sub={stats.users.byRole.map(r => `${r.role}: ${r.count}`).join(', ') || 'none'} />
                 <StatCard label="Deep-analysis tokens used" value={stats.deepAnalyses.totalTokensUsed.toLocaleString()}
-                  sub="deep-analysis pipeline only" />
+                  sub="expected 0 — pipeline is deterministic" />
               </div>
+            </div>
+
+            <div>
+              <h2 className="text-sm font-semibold text-gray-500 mb-2 uppercase tracking-wide">Content generation (OpenAI)</h2>
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+                <StatCard label="Tokens used" value={stats.contentGeneration.totalTokensUsed.toLocaleString()}
+                  sub={stats.contentGeneration.byCallType.map(t => `${t.callType}: ${t.tokens.toLocaleString()}`).join(', ') || 'none'} />
+                <StatCard label="Calls" value={stats.contentGeneration.totalCalls} />
+                <StatCard label="Failed calls" value={stats.contentGeneration.failedCalls} />
+              </div>
+            </div>
+
+            <div>
+              <h2 className="text-sm font-semibold text-gray-500 mb-2 uppercase tracking-wide">System health</h2>
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                <StatCard label="Status" value={stats.systemHealth.status || '—'}
+                  onClick={() => togglePanel('healthChecks')} expanded={expandedPanel === 'healthChecks'} />
+                <StatCard label="Uptime (1h)" value={fmtPct(stats.systemHealth.uptimePercent1h)} />
+                <StatCard label="Uptime (24h)" value={fmtPct(stats.systemHealth.uptimePercent24h)} />
+                <StatCard label="Checked" value={stats.systemHealth.checkedAt ? new Date(stats.systemHealth.checkedAt).toLocaleTimeString() : '—'}
+                  sub="self-reported, resets on restart" />
+              </div>
+              {expandedPanel === 'healthChecks' && (
+                <div className="mt-2">
+                  <HealthChecksPanel checks={stats.systemHealth.checks} />
+                </div>
+              )}
+            </div>
+
+            <div>
+              <h2 className="text-sm font-semibold text-gray-500 mb-2 uppercase tracking-wide">Latency</h2>
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                <StatCard label="p50" value={fmtMs(stats.latency.overall.p50)} />
+                <StatCard label="p95" value={fmtMs(stats.latency.overall.p95)} />
+                <StatCard label="p99" value={fmtMs(stats.latency.overall.p99)} />
+                <StatCard label="Samples" value={stats.latency.overall.count}
+                  onClick={() => togglePanel('latency')} expanded={expandedPanel === 'latency'} />
+              </div>
+              {expandedPanel === 'latency' && (
+                <div className="mt-2">
+                  <LatencyPanel latency={stats.latency} />
+                </div>
+              )}
             </div>
 
             <div>

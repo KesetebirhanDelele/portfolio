@@ -19,15 +19,16 @@ function LoginForm({ sessionMessage }) {
 
         <div>
           <h2 className="text-4xl font-bold text-white leading-tight mb-4">
-            Turn your GitHub work into a reputation that speaks for you.
+            Turn your GitHub and Colaberry work into a reputation that speaks for you.
           </h2>
           <p className="text-indigo-200 text-base leading-relaxed mb-8">
-            We analyze your repositories and highlight your skills, impact, and expertise.
+            We analyze your GitHub repositories and Colaberry network projects to highlight your skills, impact, and expertise.
           </p>
           <div className="space-y-4">
             {[
               'AI-powered repository analysis',
               'Automatic skill & tech extraction',
+              'Import from GitHub or Colaberry’s project network',
               'Portfolio-ready reports',
             ].map(feature => (
               <div key={feature} className="flex items-center gap-3 text-indigo-100">
@@ -63,9 +64,17 @@ function LoginForm({ sessionMessage }) {
           )}
 
           <h2 className="text-3xl font-bold text-gray-900 mb-2">Welcome</h2>
-          <p className="text-gray-500 text-sm mb-8">
-            Analyze your GitHub repositories and generate recruiter-ready portfolios.
+          <p className="text-gray-500 text-sm mb-4">
+            Analyze your GitHub repositories and Colaberry projects to generate recruiter-ready portfolios.
           </p>
+
+          {/* Colaberry account requirement — set expectations before the click,
+              not just as a rejection message after a failed attempt. */}
+          <div className="mb-6 px-4 py-3 rounded-xl border border-indigo-100 bg-indigo-50/60 text-indigo-700 text-xs leading-relaxed">
+            <span className="font-semibold">Colaberry students and staff only.</span> Sign in with the
+            GitHub account that has your Colaberry email verified on it — we check for a matching
+            Colaberry account before granting access.
+          </div>
 
           {/* GitHub OAuth button */}
           <button

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import AnalysisPanel from './AnalysisPanel'
 import PortfolioBuilder from './PortfolioBuilder'
 import ColaberryLiveLogin from './ColaberryLiveLogin'
@@ -57,6 +57,56 @@ function formatDate(iso) {
 
 const PAGE_SIZE = 3
 
+// Faceted multi-select dropdown (checkboxes) — used for the Colaberry network
+// browser's Categories/Tags filters. OR within the list, closes on outside click.
+function NetworkFilterDropdown({ label, options, selected, onToggle }) {
+  const [isOpen, setIsOpen] = useState(false)
+  const ref = useRef(null)
+
+  useEffect(() => {
+    if (!isOpen) return
+    const handleClickOutside = (e) => {
+      if (ref.current && !ref.current.contains(e.target)) setIsOpen(false)
+    }
+    document.addEventListener('mousedown', handleClickOutside)
+    return () => document.removeEventListener('mousedown', handleClickOutside)
+  }, [isOpen])
+
+  return (
+    <div className="relative" ref={ref}>
+      <button
+        type="button"
+        onClick={() => setIsOpen(o => !o)}
+        className="flex items-center justify-between gap-2 text-sm border border-gray-200 rounded-xl px-3 py-2 bg-white hover:border-gray-300 transition w-full"
+      >
+        <span className="truncate">{label}{selected.length > 0 ? ` (${selected.length})` : ''}</span>
+        <svg className={`w-3.5 h-3.5 text-gray-400 flex-shrink-0 transition-transform ${isOpen ? 'rotate-180' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
+          <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
+        </svg>
+      </button>
+      {isOpen && (
+        <div className="absolute z-10 mt-1 w-64 max-h-64 overflow-y-auto bg-white border border-gray-200 rounded-xl shadow-lg p-2">
+          {options.length === 0 ? (
+            <p className="text-xs text-gray-400 px-2 py-1">No options</p>
+          ) : (
+            options.map(opt => (
+              <label key={opt} className="flex items-center gap-2 px-2 py-1.5 rounded-lg hover:bg-gray-50 cursor-pointer text-sm text-gray-700">
+                <input
+                  type="checkbox"
+                  checked={selected.includes(opt)}
+                  onChange={() => onToggle(opt)}
+                  className="flex-shrink-0"
+                />
+                <span className="truncate">{opt}</span>
+              </label>
+            ))
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
 function Header({ onLogout }) {
   const [repos, setRepos]                 = useState([])
   const [loading, setLoading]             = useState(true)
@@ -95,9 +145,9 @@ function Header({ onLogout }) {
   const [colaberryLinksToImport, setColaberryLinksToImport] = useState([])
   const [colaberryLinksMode, setColaberryLinksMode]   = useState('network') // 'network' | 'paste'
   const [networkProjects, setNetworkProjects]         = useState([])
-  const [networkCategories, setNetworkCategories]     = useState([])
-  const [networkCategory, setNetworkCategory]         = useState('All')
   const [networkSearchQuery, setNetworkSearchQuery]   = useState('')
+  const [networkSelectedCategories, setNetworkSelectedCategories] = useState([])
+  const [networkSelectedTags, setNetworkSelectedTags] = useState([])
   const [isLoadingNetworkProjects, setIsLoadingNetworkProjects] = useState(false)
   const [networkLoadError, setNetworkLoadError]       = useState('')
   const [selectedNetworkLinks, setSelectedNetworkLinks] = useState([])
@@ -300,11 +350,14 @@ function Header({ onLogout }) {
 
   // Colaberry's full network-project catalog — not scoped to this user. See
   // PROGRESS.md M57 (restores Portfolioforge's original browse-and-select UX).
-  async function loadNetworkProjects(category) {
+  // Returns the whole catalog with real tag metadata (no server-side
+  // category filter — see colaberrySqlClient.js's getNetworkProjects); the
+  // title/tag search below filters it client-side.
+  async function loadNetworkProjects() {
     setIsLoadingNetworkProjects(true)
     setNetworkLoadError('')
     try {
-      const res = await authFetch(`${BASE_URL}/api/colaberry-import/network-projects?category=${encodeURIComponent(category)}`)
+      const res = await authFetch(`${BASE_URL}/api/colaberry-import/network-projects`)
       const body = res ? await res.json() : null
       if (!body?.success) throw new Error(body?.error?.message || 'Failed to load network projects.')
       setNetworkProjects(body.data.projects || [])
@@ -316,22 +369,53 @@ function Header({ onLogout }) {
     }
   }
 
-  async function loadNetworkCategories() {
-    try {
-      const res = await authFetch(`${BASE_URL}/api/colaberry-import/network-project-categories`)
-      const body = res ? await res.json() : null
-      if (body?.success) setNetworkCategories(body.data.categories || [])
-    } catch { /* category pill counts are supplementary — the project list still works without them */ }
-  }
-
-  function selectNetworkCategory(category) {
-    setNetworkCategory(category)
-    setNetworkSearchQuery('')
-    loadNetworkProjects(category)
-  }
-
   function toggleNetworkLink(link) {
     setSelectedNetworkLinks(prev => prev.includes(link) ? prev.filter(l => l !== link) : [...prev, link])
+  }
+
+  // Shared by three entry points: selecting projects and continuing,
+  // "Skip — import my own", and ColaberryLiveLogin's onComplete (after a
+  // fresh login). Tries the import directly first — the backend already
+  // reuses a stored Colaberry session if one exists, so most of the time
+  // this succeeds without ever showing the live-login modal at all. Only
+  // falls back to live-login when the backend reports NOT_CONNECTED (no
+  // stored session yet) or SESSION_EXPIRED (stored session's Colaberry
+  // cookies have actually gone stale) — previously this modal showed
+  // unconditionally on every attempt, which read as "getting logged out"
+  // every few minutes even though the stored session was often still fine.
+  async function runColaberryImport(links) {
+    setShowColaberryLogin(false)
+    setColaberryBanner('Importing your Colaberry projects…')
+    try {
+      const res = await authFetch(`${BASE_URL}/api/colaberry-import`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(links.length > 0 ? { projectLinks: links } : {}),
+      })
+      const body = res ? await res.json() : null
+      const code = body?.error?.code
+      if (code === 'NOT_CONNECTED' || code === 'SESSION_EXPIRED') {
+        setColaberryLinksToImport(links)
+        setColaberryBanner(null)
+        setShowColaberryLogin(true)
+        return
+      }
+      if (!body?.success && body?.data?.imported?.length === 0 && body?.data?.failed?.length === 0) {
+        setColaberryBanner('Connected — no Colaberry projects found for your account.')
+      } else if (!body?.success) {
+        setColaberryBanner(`Import failed: ${body?.error?.message || 'Unknown error.'}`)
+      } else {
+        const { imported, failed } = body.data
+        setColaberryBanner(
+          `Imported ${imported.length} Colaberry project${imported.length === 1 ? '' : 's'}` +
+          (failed?.length ? ` (${failed.length} failed)` : '') + '.'
+        )
+        setAnalyzingFullNames(prev => new Set([...prev, ...imported.map(p => p.title)]))
+        fetchImportedReposAndMaybeAutoImport()
+      }
+    } catch (err) {
+      setColaberryBanner(`Import failed: ${err.message}`)
+    }
   }
 
   async function handleStopAnalysis() {
@@ -844,11 +928,11 @@ function Header({ onLogout }) {
                       setColaberryLinksError('')
                       setColaberryLinksMode('network')
                       setSelectedNetworkLinks([])
-                      setNetworkCategory('All')
                       setNetworkSearchQuery('')
+                      setNetworkSelectedCategories([])
+                      setNetworkSelectedTags([])
                       setShowColaberryLinksPrompt(true)
-                      loadNetworkProjects('All')
-                      loadNetworkCategories()
+                      loadNetworkProjects()
                     }}
                     className="flex items-center gap-2.5 px-3 py-2.5 rounded-xl border border-dashed border-emerald-200 bg-emerald-50/50 hover:bg-emerald-50 hover:border-emerald-300 transition text-left"
                   >
@@ -874,9 +958,46 @@ function Header({ onLogout }) {
             )}
 
             {showColaberryLinksPrompt && (() => {
-              const visibleNetworkProjects = networkProjects.filter(p =>
-                !networkSearchQuery.trim() || p.title.toLowerCase().includes(networkSearchQuery.trim().toLowerCase())
+              // Each project carries tagsByCategory: { "Category"|"Industry"|"Tools":
+              // [tagName, ...] } — real per-tag category pairing from
+              // vw_ADF_CCS_ProjectTags_New_Catgorize (colaberrySqlClient.js). This
+              // makes the Categories facet a real cascade: picking a category
+              // narrows which tags are even offered, not just which projects show.
+              const projectTags = (p, categories) => {
+                const buckets = p.tagsByCategory || {}
+                return categories.length === 0
+                  ? Object.values(buckets).flat()
+                  : categories.flatMap(c => buckets[c] || [])
+              }
+              const tagsAvailableFor = (categories) =>
+                [...new Set(networkProjects.flatMap(p => projectTags(p, categories)))].sort()
+
+              const allNetworkCategories = [...new Set(networkProjects.flatMap(p => Object.keys(p.tagsByCategory || {})))].sort()
+              const allNetworkTags = tagsAvailableFor(networkSelectedCategories)
+
+              const visibleNetworkProjects = networkProjects.filter(p => {
+                const matchesSearch = !networkSearchQuery.trim() ||
+                  p.title.toLowerCase().includes(networkSearchQuery.trim().toLowerCase()) ||
+                  (p.tags || '').toLowerCase().includes(networkSearchQuery.trim().toLowerCase())
+                const matchesCategories = networkSelectedCategories.length === 0 ||
+                  networkSelectedCategories.some(c => (p.tagsByCategory?.[c] || []).length > 0)
+                const matchesTags = networkSelectedTags.length === 0 ||
+                  projectTags(p, []).some(t => networkSelectedTags.includes(t))
+                return matchesSearch && matchesCategories && matchesTags
+              })
+              // Selecting/deselecting a category can shrink the available tag
+              // list — prune any selected tags that fall outside it so a stale,
+              // no-longer-visible tag doesn't silently keep filtering results.
+              const toggleNetworkCategory = (cat) => setNetworkSelectedCategories(prev => {
+                const next = prev.includes(cat) ? prev.filter(c => c !== cat) : [...prev, cat]
+                const stillAvailable = tagsAvailableFor(next)
+                setNetworkSelectedTags(sel => sel.filter(t => stillAvailable.includes(t)))
+                return next
+              })
+              const toggleNetworkTag = (tag) => setNetworkSelectedTags(prev =>
+                prev.includes(tag) ? prev.filter(t => t !== tag) : [...prev, tag]
               )
+              const hasActiveFilters = networkSearchQuery.trim() || networkSelectedCategories.length > 0 || networkSelectedTags.length > 0
               const allVisibleSelected = visibleNetworkProjects.length > 0 &&
                 visibleNetworkProjects.every(p => selectedNetworkLinks.includes(p.projectLink))
               const toggleSelectAllVisible = () => {
@@ -890,12 +1011,6 @@ function Header({ onLogout }) {
               const handleContinue = () => {
                 const pastedLinks = colaberryLinksInput.split('\n').map(l => l.trim()).filter(Boolean)
                 const combined = [...new Set([...selectedNetworkLinks, ...pastedLinks])]
-                if (combined.length === 0) {
-                  setColaberryLinksToImport([])
-                  setShowColaberryLinksPrompt(false)
-                  setShowColaberryLogin(true)
-                  return
-                }
                 if (combined.length > 10) {
                   setColaberryLinksError(`You've selected ${combined.length} projects — up to 10 at a time. Remove ${combined.length - 10} to continue.`)
                   return
@@ -908,7 +1023,7 @@ function Header({ onLogout }) {
                 setColaberryLinksError('')
                 setColaberryLinksToImport(combined)
                 setShowColaberryLinksPrompt(false)
-                setShowColaberryLogin(true)
+                runColaberryImport(combined)
               }
 
               return (
@@ -959,31 +1074,28 @@ function Header({ onLogout }) {
                         />
                       ) : (
                         <>
-                          <div className="flex flex-wrap gap-2 mb-3">
-                            {['All', ...networkCategories.map(c => c.name)].map(cat => {
-                              const count = cat === 'All' ? null : networkCategories.find(c => c.name === cat)?.count
-                              return (
-                                <button
-                                  key={cat}
-                                  onClick={() => selectNetworkCategory(cat)}
-                                  className={`px-3 py-1 rounded-full text-xs font-semibold border transition ${
-                                    networkCategory === cat
-                                      ? 'bg-indigo-600 border-indigo-600 text-white'
-                                      : 'bg-white border-gray-200 text-gray-600 hover:border-gray-300'
-                                  }`}
-                                >
-                                  {cat}{count != null ? ` (${count})` : ''}
-                                </button>
-                              )
-                            })}
-                          </div>
-
-                          <div className="flex items-center gap-2 mb-3">
+                          <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 mb-3">
+                            <div className="w-full sm:w-40">
+                              <NetworkFilterDropdown
+                                label="Categories"
+                                options={allNetworkCategories}
+                                selected={networkSelectedCategories}
+                                onToggle={toggleNetworkCategory}
+                              />
+                            </div>
+                            <div className="w-full sm:w-40">
+                              <NetworkFilterDropdown
+                                label="Tags"
+                                options={allNetworkTags}
+                                selected={networkSelectedTags}
+                                onToggle={toggleNetworkTag}
+                              />
+                            </div>
                             <input
                               type="text"
                               value={networkSearchQuery}
                               onChange={e => setNetworkSearchQuery(e.target.value)}
-                              placeholder="Search network projects…"
+                              placeholder="Search by project name or tag…"
                               className="flex-1 text-sm border border-gray-200 rounded-xl px-3 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-200"
                             />
                             <button
@@ -993,6 +1105,18 @@ function Header({ onLogout }) {
                             >
                               {allVisibleSelected ? 'Clear All' : 'Select All'}
                             </button>
+                            {hasActiveFilters && (
+                              <button
+                                onClick={() => {
+                                  setNetworkSearchQuery('')
+                                  setNetworkSelectedCategories([])
+                                  setNetworkSelectedTags([])
+                                }}
+                                className="px-3 py-2 rounded-xl text-xs font-semibold border border-gray-200 text-gray-500 hover:bg-gray-50 transition whitespace-nowrap"
+                              >
+                                Clear filters
+                              </button>
+                            )}
                           </div>
 
                           {networkLoadError && (
@@ -1004,7 +1128,7 @@ function Header({ onLogout }) {
                               <p className="text-sm text-gray-400 text-center py-8">Loading network projects…</p>
                             ) : visibleNetworkProjects.length === 0 ? (
                               <p className="text-sm text-gray-400 text-center py-8">
-                                {networkSearchQuery.trim() ? 'No projects match your search.' : 'No projects found in this category.'}
+                                {hasActiveFilters ? 'No projects match your filters.' : 'No network projects found.'}
                               </p>
                             ) : (
                               visibleNetworkProjects.map(project => (
@@ -1024,6 +1148,9 @@ function Header({ onLogout }) {
                                   <div className="min-w-0">
                                     <p className="text-sm font-semibold text-gray-900 truncate">{project.title}</p>
                                     <p className="text-xs text-gray-500 line-clamp-2">{project.summary}</p>
+                                    {project.tags && (
+                                      <p className="text-[10px] text-indigo-400 truncate mt-0.5">{project.tags}</p>
+                                    )}
                                   </div>
                                 </label>
                               ))
@@ -1048,7 +1175,7 @@ function Header({ onLogout }) {
                           onClick={() => {
                             setColaberryLinksToImport([])
                             setShowColaberryLinksPrompt(false)
-                            setShowColaberryLogin(true)
+                            runColaberryImport([])
                           }}
                           className="px-4 py-2 rounded-xl text-sm font-semibold text-indigo-600 hover:bg-indigo-50 transition"
                         >
@@ -1069,33 +1196,7 @@ function Header({ onLogout }) {
 
             {showColaberryLogin && (
               <ColaberryLiveLogin
-                onComplete={async () => {
-                  setShowColaberryLogin(false)
-                  setColaberryBanner('Colaberry account connected — importing your projects…')
-                  try {
-                    const res = await authFetch(`${BASE_URL}/api/colaberry-import`, {
-                      method: 'POST',
-                      headers: { 'Content-Type': 'application/json' },
-                      body: JSON.stringify(colaberryLinksToImport.length > 0 ? { projectLinks: colaberryLinksToImport } : {}),
-                    })
-                    const body = res ? await res.json() : null
-                    if (!body?.success && body?.data?.imported?.length === 0 && body?.data?.failed?.length === 0) {
-                      setColaberryBanner('Connected — no Colaberry projects found for your account.')
-                    } else if (!body?.success) {
-                      setColaberryBanner(`Import failed: ${body?.error?.message || 'Unknown error.'}`)
-                    } else {
-                      const { imported, failed } = body.data
-                      setColaberryBanner(
-                        `Imported ${imported.length} Colaberry project${imported.length === 1 ? '' : 's'}` +
-                        (failed?.length ? ` (${failed.length} failed)` : '') + '.'
-                      )
-                      setAnalyzingFullNames(prev => new Set([...prev, ...imported.map(p => p.title)]))
-                      fetchImportedReposAndMaybeAutoImport()
-                    }
-                  } catch (err) {
-                    setColaberryBanner(`Import failed: ${err.message}`)
-                  }
-                }}
+                onComplete={() => runColaberryImport(colaberryLinksToImport)}
                 onCancel={() => setShowColaberryLogin(false)}
               />
             )}
@@ -1413,6 +1514,19 @@ function Header({ onLogout }) {
             onRepoDeleted={(repoId, fullName) => {
               setImportedRepos(prev => prev.filter(r => r.id !== repoId))
               if (fullName) setAnalyzingFullNames(prev => { const n = new Set(prev); n.delete(fullName); return n })
+            }}
+            onRepoAnalyzed={(fullName) => {
+              // PortfolioBuilder's own poll calls this on every tick for every
+              // already-done repo, not just newly-finished ones — bail out
+              // without a new Set reference when there's nothing to clear, so
+              // this doesn't force a Header re-render every 5s for repos that
+              // finished long ago.
+              setAnalyzingFullNames(prev => {
+                if (!prev.has(fullName)) return prev
+                const n = new Set(prev)
+                n.delete(fullName)
+                return n
+              })
             }}
           />
         )}

@@ -377,7 +377,7 @@ function MediaInput({ repoName, value, onChange }) {
   )
 }
 
-function PortfolioBuilder({ onLogout, onGoToBrowse, onRepoDeleted, autoStart = false }) {
+function PortfolioBuilder({ onLogout, onGoToBrowse, onRepoDeleted, onRepoAnalyzed, autoStart = false }) {
   // Data loading
   const [importedRepos, setImportedRepos] = useState([])
   const [analysisMap, setAnalysisMap]     = useState({})
@@ -719,6 +719,14 @@ function PortfolioBuilder({ onLogout, onGoToBrowse, onRepoDeleted, autoStart = f
         if (aJson?.success) {
           const a = aJson.data
           newStatusMap[repo.id] = { status: a.status }
+          // Tells Header.jsx's own separate "Analyzing N repos" banner poll
+          // (different interval, different component) the moment THIS poll
+          // discovers completion — otherwise the banner and this card's own
+          // badge can disagree for however long it takes the other poll to
+          // catch up. See PROGRESS.md for the reported case this fixes.
+          if (['completed', 'partial', 'failed', 'cancelled'].includes(a.status)) {
+            onRepoAnalyzed?.(repo.full_name)
+          }
           if (a.status === 'completed') {
             newAnalysisMap[repo.id] = {
               status:          a.status,
@@ -740,6 +748,9 @@ function PortfolioBuilder({ onLogout, onGoToBrowse, onRepoDeleted, autoStart = f
       if (dJson?.success) {
         const d = dJson.data
         newStatusMap[repo.id] = { status: d.status }
+        if (['completed', 'partial', 'failed', 'cancelled'].includes(d.status)) {
+          onRepoAnalyzed?.(repo.full_name)
+        }
         if (['completed', 'partial'].includes(d.status)) {
           newAnalysisMap[repo.id] = {
             status:          d.status,

@@ -1,0 +1,128 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    # Loopback-only: the backend/frontend containers run with
+    # network_mode: host (see below) and reach this via localhost, not
+    # Docker DNS. Never bound to 0.0.0.0 — not reachable off this host.
+    ports:
+      - "127.0.0.1:5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD}"]
+    volumes:
+      - redis_data:/data
+    # Host-side port is configurable (REDIS_HOST_PORT, defaults to 6379) —
+    # this dev machine already runs an unrelated project's Redis on 6379
+    # (see PROGRESS.md M66, same collision, same fix). The Hetzner server
+    # will be a clean host, so the default applies there unmodified.
+    ports:
+      - "127.0.0.1:${REDIS_HOST_PORT:-6379}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  # One-shot: runs migrations, exits. Stays on the default Compose network
+  # (unlike backend/frontend below) so it can reach postgres by service
+  # name — it never touches the live-login feature, so it has no reason to
+  # need host networking.
+  migrate:
+    build:
+      context: ./backend
+    command: ["npm", "run", "migrate:up"]
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  # network_mode: host — required, not optional. colaberryLiveLoginSessionManager.js
+  # spawns sibling containers (over the mounted socket) that publish their
+  # ports to the HOST's 127.0.0.1; without host networking, this container's
+  # own 127.0.0.1 is a different namespace and those connections fail
+  # outright. See deployment.md's "Colaberry live-login" section for the
+  # full explanation, including why postgres/redis are reached via
+  # localhost instead of Docker DNS as a direct consequence of this.
+  backend:
+    build:
+      context: ./backend
+    network_mode: host
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@localhost:5432/${POSTGRES_DB}
+      REDIS_URL: redis://:${REDIS_PASSWORD}@localhost:${REDIS_HOST_PORT:-6379}
+      PORT: "5000"
+    volumes:
+      # Sibling-container control for the live-login feature — see the
+      # comment above. This is root-equivalent host access; the socket
+      # mount is the whole reason this service needs network_mode: host.
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    # curl is already in this image (installed for the Docker CLI apt-get
+    # setup above). Hits the same GET /api/health that healthMonitor.js
+    # samples internally — -f treats the 503 an unhealthy required
+    # dependency (Postgres/Redis) returns as a failed check.
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://127.0.0.1:5000/api/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    restart: unless-stopped
+
+  # Also host-networked — the same reason as backend: it reverse-proxies
+  # /api/* to http://127.0.0.1:5000 (nginx.conf), which only resolves to
+  # the backend under host networking, not a Docker bridge network.
+  # Publicly reachable on the host's ports 80/443 (Hetzner Firewall gates
+  # this, not Compose). TLS terminates here via a nip.io Let's Encrypt cert
+  # (deployment.md's TLS stopgap, 2026-08-16) — certs live on the host at
+  # /etc/letsencrypt (certbot manages renewal there) and are mounted
+  # read-only so a container rebuild never needs to bake in cert material.
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        VITE_API_BASE_URL: ""
+    network_mode: host
+    volumes:
+      - /etc/letsencrypt:/etc/letsencrypt:ro
+    depends_on:
+      - backend
+    # nginx:alpine ships wget (busybox), not curl. --no-check-certificate
+    # because the nip.io cert's CN doesn't match the bare IP this hits
+    # itself as — that's expected for a self-probe, not a real trust issue
+    # (the cert is still real Let's Encrypt for actual external visitors).
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-check-certificate -q -O /dev/null https://127.0.0.1/ || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  redis_data:
