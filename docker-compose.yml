@@ -81,6 +81,16 @@ services:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
+    # curl is already in this image (installed for the Docker CLI apt-get
+    # setup above). Hits the same GET /api/health that healthMonitor.js
+    # samples internally — -f treats the 503 an unhealthy required
+    # dependency (Postgres/Redis) returns as a failed check.
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://127.0.0.1:5000/api/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
     restart: unless-stopped
 
   # Also host-networked — the same reason as backend: it reverse-proxies
@@ -101,6 +111,16 @@ services:
       - /etc/letsencrypt:/etc/letsencrypt:ro
     depends_on:
       - backend
+    # nginx:alpine ships wget (busybox), not curl. --no-check-certificate
+    # because the nip.io cert's CN doesn't match the bare IP this hits
+    # itself as — that's expected for a self-probe, not a real trust issue
+    # (the cert is still real Let's Encrypt for actual external visitors).
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-check-certificate -q -O /dev/null https://127.0.0.1/ || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
     restart: unless-stopped
 
 volumes:

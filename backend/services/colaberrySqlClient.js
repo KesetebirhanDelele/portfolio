@@ -147,4 +147,5 @@ async function getNetworkProjects() {
 module.exports = {
   getColaberryUserByEmail, getProjectLinksForUser,
   getNetworkProjects,
+  getPool, // exposed for healthChecks.js's read-only connectivity probe
 };
