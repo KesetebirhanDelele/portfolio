@@ -367,10 +367,13 @@ What's live today (raw IP, personal accounts, single server) is a real, working 
 
 ### Domain and TLS
 
-Raw IP + plain HTTP was the deliberate choice for getting to a working deployment fast (see "Architecture decisions" above). Real institutional use needs:
+**Update (2026-08-16): TLS is live, but via a stopgap, not a real domain.** Plain HTTP turned out to be more than cosmetic — it silently broke the Colaberry live-login feature outright (noVNC refuses to run outside a secure context; see `PROGRESS.md` M74–M77 for the full diagnosis). Rather than block that fix on the domain decision below, shipped TLS immediately using `46.62.228.67.nip.io` — `nip.io` resolves any `<ip>.nip.io` hostname straight back to that IP, which lets Let's Encrypt's HTTP-01 challenge complete with no domain purchase, no DNS setup, and no waiting on anyone's decision. The cert is genuinely trusted (no browser warning), auto-renews via certbot's systemd timer, and `FRONTEND_URL`/the GitHub OAuth App's callback URL were both updated to match. nginx now terminates TLS on 443 and redirects all plain-HTTP traffic (including bare-IP hits) to the HTTPS origin.
+
+This does **not** resolve the question below — `nip.io` is a third-party dependency the app now soft-relies on for its hostname, and it's explicitly a stopgap: swap the cert path in `frontend/nginx.conf` for a real domain's cert whenever that decision lands, no re-architecting needed.
+
+Real institutional use still needs:
 - A real domain/subdomain (e.g. `portfolio.colaberry.com`) with a DNS **A record** pointed at the server.
-- Certbot or Caddy for a free, auto-renewing Let's Encrypt certificate — mechanical once the domain exists.
-- nginx updated to terminate TLS on 443 and redirect 80 → 443.
+- nginx's cert paths repointed from the nip.io cert to the real domain's cert (mechanical — same TLS termination logic already in place).
 
 **Blocking question, not mine to decide**: whose domain? If Colaberry doesn't already have one to use a subdomain of, registering one is a new paid external dependency — an "escalate" item under this repo's own `CLAUDE.md` Autonomy Model, not an implementation detail.
 
