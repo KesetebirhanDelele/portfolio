@@ -1515,6 +1515,19 @@ function Header({ onLogout }) {
               setImportedRepos(prev => prev.filter(r => r.id !== repoId))
               if (fullName) setAnalyzingFullNames(prev => { const n = new Set(prev); n.delete(fullName); return n })
             }}
+            onRepoAnalyzed={(fullName) => {
+              // PortfolioBuilder's own poll calls this on every tick for every
+              // already-done repo, not just newly-finished ones — bail out
+              // without a new Set reference when there's nothing to clear, so
+              // this doesn't force a Header re-render every 5s for repos that
+              // finished long ago.
+              setAnalyzingFullNames(prev => {
+                if (!prev.has(fullName)) return prev
+                const n = new Set(prev)
+                n.delete(fullName)
+                return n
+              })
+            }}
           />
         )}
 
