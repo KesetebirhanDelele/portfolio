@@ -77,7 +77,13 @@ async function startSession(userId, loginUrl) {
     '--name', containerName,
     '-p', '127.0.0.1::6080',
     '-p', '127.0.0.1::7000',
-    '--memory=512m',
+    // 512m was too tight for a real Chrome session (renderer + GPU process +
+    // network service) navigating a real modern web app — confirmed live on
+    // 2026-08-16: Colaberry's actual site OOM-killed the renderer (Chrome's
+    // "Aw, Snap!" page, error code 9 = SIGKILL) mid-login. 1024m is a
+    // conservative doubling, not a precise measurement — revisit if OOM
+    // kills recur even at this limit.
+    '--memory=1024m',
     '--cpus=1',
     '-e', `COLABERRY_LOGIN_URL=${loginUrl}`,
     IMAGE,
