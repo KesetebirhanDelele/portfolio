@@ -90,13 +90,28 @@ async function getProjectLinksForUser(userId) {
 async function getNetworkProjects() {
   const pool = await getPool();
   const [projectsResult, tagsResult] = await Promise.all([
+    // PARTITION BY projectID, not by normalized name — confirmed live
+    // (2026-08-17) that Colaberry's own view has projectID 1443 under two
+    // DIFFERENT ProjectName records ("Human Resource Dashboard" and a
+    // shorter "Human Resources"), a data artifact on Colaberry's side, not
+    // a naming coincidence. Partitioning by name alone let both survive as
+    // separate rowNumber=1 rows sharing one projectID — which becomes a
+    // React key collision downstream (networkId is projectID), causing
+    // real, hard-to-diagnose duplicate rendering and filter-matching bugs
+    // in production (React only warns about duplicate keys in dev builds).
+    // Deduping by projectID instead is strictly safer: it still keeps
+    // genuinely distinct projects that happen to share a title (different
+    // projectIDs, never collapsed against each other), while guaranteeing
+    // each projectID can only ever produce one row/key downstream. Ties
+    // prefer the longer name — the more complete/final title, not a
+    // possibly-stale shorter one.
     pool.request().query(`
       WITH RankedProjects AS (
         SELECT
           projectID, ProjectName, ProjectSummary, ProjectVisual,
           ROW_NUMBER() OVER (
-            PARTITION BY LOWER(LTRIM(RTRIM(ProjectName)))
-            ORDER BY projectID DESC
+            PARTITION BY projectID
+            ORDER BY LEN(LTRIM(RTRIM(ProjectName))) DESC, ProjectName DESC
           ) AS rowNumber
         FROM dbo.vw_ADF_Proj_Deployed_WithTags
         WHERE projectID IS NOT NULL
