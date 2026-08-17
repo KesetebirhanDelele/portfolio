@@ -1,6 +1,9 @@
+@import './styles/fonts.css';
+@import './styles/colors.css';
+@import './styles/typography.css';
+@import './styles/spacing.css';
+@import './styles/base.css';
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
-body {
-  @apply bg-gray-50 text-gray-900;
-}

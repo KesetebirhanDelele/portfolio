@@ -1,5 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
 import { BASE_URL } from './api'
+import { Button } from './components/ui/Button'
+import { Card } from './components/ui/Card'
 
 const A  = '#4361ee'
 const T  = '#0f172a'
@@ -46,24 +48,7 @@ function PortfolioCard({ portfolio }) {
       rel="noopener noreferrer"
       style={{ textDecoration: 'none', display: 'block' }}
     >
-      <div
-        style={{
-          backgroundColor: '#fff',
-          border: `1px solid ${BD}`,
-          borderRadius: '14px',
-          padding: '20px',
-          transition: 'box-shadow 0.18s, border-color 0.18s',
-          cursor: 'pointer',
-        }}
-        onMouseEnter={e => {
-          e.currentTarget.style.boxShadow = '0 6px 24px rgba(67,97,238,0.12)'
-          e.currentTarget.style.borderColor = '#a5b4fc'
-        }}
-        onMouseLeave={e => {
-          e.currentTarget.style.boxShadow = 'none'
-          e.currentTarget.style.borderColor = BD
-        }}
-      >
+      <Card hoverable padded>
         {/* Header row */}
         <div style={{ display: 'flex', alignItems: 'flex-start', gap: '14px', marginBottom: '12px' }}>
           <div style={{
@@ -119,7 +104,7 @@ function PortfolioCard({ portfolio }) {
             View portfolio →
           </span>
         </div>
-      </div>
+      </Card>
     </a>
   )
 }
@@ -230,16 +215,7 @@ export default function RecruiterSearch() {
               onFocus={e => e.target.style.borderColor = A}
               onBlur={e => e.target.style.borderColor = BD}
             />
-            <button
-              onClick={() => doSearch(1)}
-              style={{
-                padding: '10px 20px', borderRadius: '10px', border: 'none',
-                backgroundColor: A, color: '#fff', fontWeight: '700',
-                fontSize: '14px', cursor: 'pointer',
-              }}
-            >
-              Search
-            </button>
+            <Button onClick={() => doSearch(1)}>Search</Button>
           </div>
 
           {/* Filters */}
@@ -267,16 +243,13 @@ export default function RecruiterSearch() {
               {languages.map(l => <option key={l} value={l}>{l}</option>)}
             </select>
             {(query || skillFilter || langFilter) && (
-              <button
+              <Button
+                variant="outline"
+                size="sm"
                 onClick={() => { setQuery(''); setSkillFilter(''); setLangFilter(''); setTimeout(() => doSearch(1), 50) }}
-                style={{
-                  padding: '7px 14px', borderRadius: '8px',
-                  border: `1px solid ${BD}`, backgroundColor: '#fff',
-                  color: TS, fontSize: '13px', cursor: 'pointer',
-                }}
               >
                 Clear
-              </button>
+              </Button>
             )}
           </div>
         </div>
@@ -317,31 +290,13 @@ export default function RecruiterSearch() {
         {/* Pagination */}
         {totalPages > 1 && !loading && (
           <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '8px' }}>
-            <button
-              onClick={() => doSearch(page - 1)}
-              disabled={page === 1}
-              style={{
-                padding: '7px 14px', borderRadius: '8px', border: `1px solid ${BD}`,
-                backgroundColor: '#fff', color: TS, fontSize: '13px',
-                cursor: page === 1 ? 'not-allowed' : 'pointer',
-                opacity: page === 1 ? 0.4 : 1,
-              }}
-            >
+            <Button variant="outline" size="sm" onClick={() => doSearch(page - 1)} disabled={page === 1}>
               ← Previous
-            </button>
+            </Button>
             <span style={{ fontSize: '13px', color: TM }}>Page {page} of {totalPages}</span>
-            <button
-              onClick={() => doSearch(page + 1)}
-              disabled={page === totalPages}
-              style={{
-                padding: '7px 14px', borderRadius: '8px', border: `1px solid ${BD}`,
-                backgroundColor: '#fff', color: TS, fontSize: '13px',
-                cursor: page === totalPages ? 'not-allowed' : 'pointer',
-                opacity: page === totalPages ? 0.4 : 1,
-              }}
-            >
+            <Button variant="outline" size="sm" onClick={() => doSearch(page + 1)} disabled={page === totalPages}>
               Next →
-            </button>
+            </Button>
           </div>
         )}
       </div>

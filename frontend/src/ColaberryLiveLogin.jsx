@@ -127,10 +127,10 @@ function ColaberryLiveLogin({ onComplete, onCancel }) {
   const currentStepIdx = STEP_ORDER.indexOf(status)
 
   return (
-    <div className="fixed inset-0 bg-gray-900/60 flex items-center justify-center z-50 p-4">
+    <div className="fixed inset-0 bg-neutral-900/60 flex items-center justify-center z-50 p-4">
       <div className="bg-white rounded-2xl shadow-xl w-full max-w-3xl overflow-hidden">
-        <div className="px-6 py-4 border-b border-gray-100">
-          <h3 className="text-lg font-bold text-gray-900">Connect your Colaberry account</h3>
+        <div className="px-6 py-4 border-b border-line-subtle">
+          <h3 className="text-lg font-bold text-text-strong">Connect your Colaberry account</h3>
 
           {/* Step-by-step status — always visible so the user knows exactly
               what's happening and what to do next, not just a spinner. */}
@@ -143,12 +143,12 @@ function ColaberryLiveLogin({ onComplete, onCancel }) {
                   <span
                     className={
                       'w-4 h-4 rounded-full flex items-center justify-center flex-shrink-0 text-[10px] font-bold ' +
-                      (isDone ? 'bg-emerald-500 text-white' : isCurrent ? 'bg-indigo-600 text-white' : 'bg-gray-200 text-gray-500')
+                      (isDone ? 'bg-emerald-500 text-white' : isCurrent ? 'bg-brand-600 text-white' : 'bg-neutral-200 text-text-muted')
                     }
                   >
                     {isDone ? '✓' : idx + 1}
                   </span>
-                  <span className={isCurrent ? 'font-semibold text-indigo-700' : isDone ? 'text-emerald-700' : 'text-gray-400'}>
+                  <span className={isCurrent ? 'font-semibold text-brand-700' : isDone ? 'text-emerald-700' : 'text-text-subtle'}>
                     {step.label}
                   </span>
                 </li>
@@ -156,7 +156,7 @@ function ColaberryLiveLogin({ onComplete, onCancel }) {
             })}
           </ol>
 
-          <p className="text-sm text-gray-500 mt-2">
+          <p className="text-sm text-text-muted mt-2">
             {status === 'connected'
               ? "Log in below exactly as you normally would. Once you're in, click \"I'm logged in\"."
               : status === 'starting' || status === 'connecting'
@@ -167,7 +167,7 @@ function ColaberryLiveLogin({ onComplete, onCancel }) {
 
         <div className="bg-black flex items-center justify-center relative" style={{ minHeight: 480 }}>
           {(status === 'starting' || status === 'connecting') && (
-            <p className="text-gray-400 text-sm">
+            <p className="text-text-subtle text-sm">
               {status === 'starting' ? 'Starting your secure browser session…' : 'Connecting to the live browser…'}
             </p>
           )}
@@ -176,7 +176,7 @@ function ColaberryLiveLogin({ onComplete, onCancel }) {
               <p className="text-red-400 text-sm mb-3">{error}</p>
               <button
                 onClick={handleRetry}
-                className="px-4 py-1.5 rounded-lg text-xs font-semibold text-white bg-indigo-600 hover:bg-indigo-700 transition"
+                className="px-4 py-1.5 rounded-lg text-xs font-semibold text-white bg-brand-600 hover:bg-brand-700 transition"
               >
                 Try Again
               </button>
@@ -198,17 +198,17 @@ function ColaberryLiveLogin({ onComplete, onCancel }) {
           />
         </div>
 
-        <div className="px-6 py-4 border-t border-gray-100 flex items-center justify-end gap-3">
+        <div className="px-6 py-4 border-t border-line-subtle flex items-center justify-end gap-3">
           <button
             onClick={handleCancel}
-            className="px-4 py-2 rounded-xl text-sm font-semibold text-gray-600 hover:bg-gray-50 transition"
+            className="px-4 py-2 rounded-xl text-sm font-semibold text-text-muted hover:bg-surface-subtle transition"
           >
             Cancel
           </button>
           <button
             onClick={handleImLoggedIn}
             disabled={status !== 'connected'}
-            className="px-5 py-2 rounded-xl text-sm font-semibold text-white bg-indigo-600 hover:bg-indigo-700 disabled:bg-gray-300 disabled:cursor-not-allowed transition"
+            className="px-5 py-2 rounded-xl text-sm font-semibold text-white bg-brand-600 hover:bg-brand-700 disabled:bg-neutral-300 disabled:cursor-not-allowed transition"
           >
             {status === 'completing' ? 'Saving session…' : "I'm logged in — Continue"}
           </button>

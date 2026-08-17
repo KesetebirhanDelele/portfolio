@@ -11,15 +11,15 @@ function StatCard({ label, value, sub, onClick, expanded }) {
       onClick={onClick}
       disabled={!clickable}
       className={`text-left px-4 py-3 rounded-xl border bg-white shadow-sm transition ${
-        clickable ? 'border-gray-200 hover:border-indigo-300 hover:shadow cursor-pointer' : 'border-gray-200 cursor-default'
-      } ${expanded ? 'ring-2 ring-indigo-400' : ''}`}
+        clickable ? 'border-line-subtle hover:border-brand-300 hover:shadow cursor-pointer' : 'border-line-subtle cursor-default'
+      } ${expanded ? 'ring-2 ring-brand-400' : ''}`}
     >
-      <div className="text-xs font-medium text-gray-500 flex items-center justify-between">
+      <div className="text-xs font-medium text-text-muted flex items-center justify-between">
         {label}
-        {clickable && <span className="text-gray-300">{expanded ? '▲' : '▼'}</span>}
+        {clickable && <span className="text-text-subtle">{expanded ? '▲' : '▼'}</span>}
       </div>
-      <div className="text-2xl font-bold text-gray-900 mt-1">{value}</div>
-      {sub && <div className="text-xs text-gray-400 mt-1">{sub}</div>}
+      <div className="text-2xl font-bold text-text-strong mt-1">{value}</div>
+      {sub && <div className="text-xs text-text-subtle mt-1">{sub}</div>}
     </button>
   )
 }
@@ -44,17 +44,17 @@ const DEP_LABELS = { postgres: 'Postgres', redis: 'Redis', colaberryMssql: 'Cola
 
 function HealthChecksPanel({ checks }) {
   if (!checks) {
-    return <div className="px-4 py-3 text-sm text-gray-400 rounded-xl border border-gray-200 bg-white">No health sample yet.</div>
+    return <div className="px-4 py-3 text-sm text-text-subtle rounded-xl border border-line-subtle bg-white">No health sample yet.</div>
   }
   return (
-    <div className="rounded-xl border border-gray-200 bg-white shadow-sm divide-y divide-gray-100">
+    <div className="rounded-xl border border-line-subtle bg-white shadow-sm divide-y divide-line-subtle">
       {Object.entries(checks).map(([name, c]) => (
         <div key={name} className="px-4 py-3 text-sm flex items-center justify-between">
           <div className="flex items-center gap-2">
             <span className={`w-2 h-2 rounded-full ${c.status === 'up' ? 'bg-emerald-500' : 'bg-red-500'}`} />
-            <span className="font-medium text-gray-800">{DEP_LABELS[name] || name}</span>
+            <span className="font-medium text-text-body">{DEP_LABELS[name] || name}</span>
           </div>
-          <div className="text-xs text-gray-400">
+          <div className="text-xs text-text-subtle">
             {c.status === 'up' ? `${c.latencyMs}ms` : (c.error || 'down')}
           </div>
         </div>
@@ -66,11 +66,11 @@ function HealthChecksPanel({ checks }) {
 function LatencyPanel({ latency }) {
   const rows = Object.entries(latency?.byRouteGroup || {}).sort((a, b) => (b[1].count || 0) - (a[1].count || 0))
   if (rows.length === 0) {
-    return <div className="px-4 py-3 text-sm text-gray-400 rounded-xl border border-gray-200 bg-white">No request samples yet.</div>
+    return <div className="px-4 py-3 text-sm text-text-subtle rounded-xl border border-line-subtle bg-white">No request samples yet.</div>
   }
   return (
-    <div className="rounded-xl border border-gray-200 bg-white shadow-sm divide-y divide-gray-100 overflow-x-auto">
-      <div className="px-4 py-2 text-xs font-semibold text-gray-400 flex gap-4 min-w-[420px]">
+    <div className="rounded-xl border border-line-subtle bg-white shadow-sm divide-y divide-line-subtle overflow-x-auto">
+      <div className="px-4 py-2 text-xs font-semibold text-text-subtle flex gap-4 min-w-[420px]">
         <span className="flex-1">Route</span>
         <span className="w-16 text-right">p50</span>
         <span className="w-16 text-right">p95</span>
@@ -79,11 +79,11 @@ function LatencyPanel({ latency }) {
       </div>
       {rows.map(([route, s]) => (
         <div key={route} className="px-4 py-2 text-sm flex gap-4 min-w-[420px]">
-          <span className="flex-1 font-mono text-gray-700 truncate">{route}</span>
-          <span className="w-16 text-right text-gray-600">{fmtMs(s.p50)}</span>
-          <span className="w-16 text-right text-gray-600">{fmtMs(s.p95)}</span>
-          <span className="w-16 text-right text-gray-600">{fmtMs(s.p99)}</span>
-          <span className="w-16 text-right text-gray-400">{s.count}</span>
+          <span className="flex-1 font-mono text-text-body truncate">{route}</span>
+          <span className="w-16 text-right text-text-muted">{fmtMs(s.p50)}</span>
+          <span className="w-16 text-right text-text-muted">{fmtMs(s.p95)}</span>
+          <span className="w-16 text-right text-text-muted">{fmtMs(s.p99)}</span>
+          <span className="w-16 text-right text-text-subtle">{s.count}</span>
         </div>
       ))}
     </div>
@@ -92,21 +92,21 @@ function LatencyPanel({ latency }) {
 
 function DeepAnalysisFailurePanel({ failures }) {
   if (failures.length === 0) {
-    return <div className="px-4 py-3 text-sm text-gray-400 rounded-xl border border-gray-200 bg-white">No deep-analysis failures.</div>
+    return <div className="px-4 py-3 text-sm text-text-subtle rounded-xl border border-line-subtle bg-white">No deep-analysis failures.</div>
   }
   return (
-    <div className="rounded-xl border border-gray-200 bg-white shadow-sm divide-y divide-gray-100">
+    <div className="rounded-xl border border-line-subtle bg-white shadow-sm divide-y divide-line-subtle">
       {failures.map(f => (
         <div key={f.id} className="px-4 py-3 text-sm">
           <div className="flex items-center justify-between">
-            <span className="font-medium text-gray-800">{f.repositoryName}</span>
-            <span className="text-gray-400 text-xs">{new Date(f.createdAt).toLocaleString()}</span>
+            <span className="font-medium text-text-body">{f.repositoryName}</span>
+            <span className="text-text-subtle text-xs">{new Date(f.createdAt).toLocaleString()}</span>
           </div>
           {f.phaseErrors ? (
             <div className="mt-2 space-y-1">
               {Object.entries(f.phaseErrors).map(([phase, detail]) => (
                 <div key={phase} className="text-xs">
-                  <span className="font-mono text-gray-500">{phase}</span>
+                  <span className="font-mono text-text-muted">{phase}</span>
                   {detail.code && <span className="ml-1 px-1.5 py-0.5 rounded bg-red-50 text-red-600 font-mono">{detail.code}</span>}
                   {detail.retryable && <span className="ml-1 px-1.5 py-0.5 rounded bg-amber-50 text-amber-600">retryable</span>}
                   <div className="text-red-700 mt-0.5">{detail.message}</div>
@@ -114,7 +114,7 @@ function DeepAnalysisFailurePanel({ failures }) {
               ))}
             </div>
           ) : (
-            <div className="text-gray-400 text-xs mt-1">No phase-level error detail recorded.</div>
+            <div className="text-text-subtle text-xs mt-1">No phase-level error detail recorded.</div>
           )}
         </div>
       ))}
@@ -124,19 +124,19 @@ function DeepAnalysisFailurePanel({ failures }) {
 
 function QueueFailurePanel({ failures }) {
   if (failures.length === 0) {
-    return <div className="px-4 py-3 text-sm text-gray-400 rounded-xl border border-gray-200 bg-white">No queue job failures.</div>
+    return <div className="px-4 py-3 text-sm text-text-subtle rounded-xl border border-line-subtle bg-white">No queue job failures.</div>
   }
   return (
-    <div className="rounded-xl border border-gray-200 bg-white shadow-sm divide-y divide-gray-100">
+    <div className="rounded-xl border border-line-subtle bg-white shadow-sm divide-y divide-line-subtle">
       {failures.map(job => (
         <div key={job.id} className="px-4 py-3 text-sm">
           <div className="flex items-center justify-between">
-            <span className="font-mono text-gray-800">{job.name}</span>
-            <span className="text-gray-400 text-xs">{job.finishedOn ? new Date(job.finishedOn).toLocaleString() : 'unknown time'}</span>
+            <span className="font-mono text-text-body">{job.name}</span>
+            <span className="text-text-subtle text-xs">{job.finishedOn ? new Date(job.finishedOn).toLocaleString() : 'unknown time'}</span>
           </div>
           <div className="text-red-700 text-xs mt-1">{job.failedReason || 'No failure reason recorded.'}</div>
           {job.data && (
-            <div className="text-gray-400 text-xs mt-1 font-mono truncate">{JSON.stringify(job.data)}</div>
+            <div className="text-text-subtle text-xs mt-1 font-mono truncate">{JSON.stringify(job.data)}</div>
           )}
         </div>
       ))}
@@ -184,23 +184,23 @@ function AdminStats({ onLogout }) {
   }
 
   return (
-    <div className="min-h-screen bg-gray-50 p-4">
-      <div className="flex items-center justify-between px-6 py-3 bg-white border border-gray-200 rounded-3xl shadow-sm mb-4">
+    <div className="min-h-screen bg-surface-subtle p-4">
+      <div className="flex items-center justify-between px-6 py-3 bg-white border border-line-subtle rounded-3xl shadow-sm mb-4">
         <div className="flex items-center gap-3">
-          <div className="w-10 h-10 rounded-xl bg-indigo-600 flex items-center justify-center text-white font-bold text-lg shadow-md">R</div>
+          <div className="w-10 h-10 rounded-xl bg-brand-600 flex items-center justify-center text-white font-bold text-lg shadow-md">R</div>
           <h1 className="text-xl font-bold tracking-tight">
-            <span className="text-gray-900">Admin</span>{' '}
-            <span className="text-indigo-600">Stats</span>
+            <span className="text-text-strong">Admin</span>{' '}
+            <span className="text-brand-600">Stats</span>
           </h1>
         </div>
         <div className="flex items-center gap-3">
-          <button onClick={load} className="px-4 py-2 rounded-full border border-gray-200 bg-white hover:bg-gray-50 transition font-semibold text-sm">Refresh</button>
-          <a href="/" className="text-sm font-medium text-gray-600 hover:text-indigo-600 transition">← Back</a>
+          <button onClick={load} className="px-4 py-2 rounded-full border border-line-subtle bg-white hover:bg-surface-subtle transition font-semibold text-sm">Refresh</button>
+          <a href="/" className="text-sm font-medium text-text-muted hover:text-brand-600 transition">← Back</a>
         </div>
       </div>
 
       <div className="max-w-4xl mx-auto space-y-6">
-        {loading && <div className="text-sm text-gray-500">Loading…</div>}
+        {loading && <div className="text-sm text-text-muted">Loading…</div>}
 
         {error && (
           <div className="px-4 py-3 rounded-xl border border-red-200 bg-red-50 text-red-700 text-sm">{error}</div>
@@ -209,7 +209,7 @@ function AdminStats({ onLogout }) {
         {stats && (
           <>
             <div>
-              <h2 className="text-sm font-semibold text-gray-500 mb-2 uppercase tracking-wide">Overview</h2>
+              <h2 className="text-sm font-semibold text-text-muted mb-2 uppercase tracking-wide">Overview</h2>
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
                 <StatCard label="Portfolios" value={stats.portfolios.total} />
                 <StatCard label="Repositories" value={sumCounts(stats.repositories.byProvider)}
@@ -222,7 +222,7 @@ function AdminStats({ onLogout }) {
             </div>
 
             <div>
-              <h2 className="text-sm font-semibold text-gray-500 mb-2 uppercase tracking-wide">Content generation (OpenAI)</h2>
+              <h2 className="text-sm font-semibold text-text-muted mb-2 uppercase tracking-wide">Content generation (OpenAI)</h2>
               <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
                 <StatCard label="Tokens used" value={stats.contentGeneration.totalTokensUsed.toLocaleString()}
                   sub={stats.contentGeneration.byCallType.map(t => `${t.callType}: ${t.tokens.toLocaleString()}`).join(', ') || 'none'} />
@@ -232,7 +232,7 @@ function AdminStats({ onLogout }) {
             </div>
 
             <div>
-              <h2 className="text-sm font-semibold text-gray-500 mb-2 uppercase tracking-wide">System health</h2>
+              <h2 className="text-sm font-semibold text-text-muted mb-2 uppercase tracking-wide">System health</h2>
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
                 <StatCard label="Status" value={stats.systemHealth.status || '—'}
                   onClick={() => togglePanel('healthChecks')} expanded={expandedPanel === 'healthChecks'} />
@@ -249,7 +249,7 @@ function AdminStats({ onLogout }) {
             </div>
 
             <div>
-              <h2 className="text-sm font-semibold text-gray-500 mb-2 uppercase tracking-wide">Latency</h2>
+              <h2 className="text-sm font-semibold text-text-muted mb-2 uppercase tracking-wide">Latency</h2>
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
                 <StatCard label="p50" value={fmtMs(stats.latency.overall.p50)} />
                 <StatCard label="p95" value={fmtMs(stats.latency.overall.p95)} />
@@ -265,7 +265,7 @@ function AdminStats({ onLogout }) {
             </div>
 
             <div>
-              <h2 className="text-sm font-semibold text-gray-500 mb-2 uppercase tracking-wide">Heavy-task queue (live)</h2>
+              <h2 className="text-sm font-semibold text-text-muted mb-2 uppercase tracking-wide">Heavy-task queue (live)</h2>
               <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
                 <StatCard label="Waiting" value={stats.heavyTaskQueue.waiting ?? 0} />
                 <StatCard label="Active" value={stats.heavyTaskQueue.active ?? 0} />
@@ -282,7 +282,7 @@ function AdminStats({ onLogout }) {
             </div>
 
             <div>
-              <h2 className="text-sm font-semibold text-gray-500 mb-2 uppercase tracking-wide">Deep analysis</h2>
+              <h2 className="text-sm font-semibold text-text-muted mb-2 uppercase tracking-wide">Deep analysis</h2>
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
                 <StatCard label="Completed" value={countFor(stats.deepAnalyses.byStatus, 'completed')} />
                 <StatCard label="Running" value={countFor(stats.deepAnalyses.byStatus, 'running')} />
@@ -298,12 +298,12 @@ function AdminStats({ onLogout }) {
             </div>
 
             {stats.notes?.length > 0 && (
-              <div className="text-xs text-gray-400">
+              <div className="text-xs text-text-subtle">
                 {stats.notes.map((n, i) => <div key={i}>{n}</div>)}
               </div>
             )}
 
-            <div className="text-xs text-gray-400">Last updated {new Date(stats.generatedAt).toLocaleString()}</div>
+            <div className="text-xs text-text-subtle">Last updated {new Date(stats.generatedAt).toLocaleString()}</div>
           </>
         )}
       </div>

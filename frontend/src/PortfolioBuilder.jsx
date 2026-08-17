@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useMemo } from 'react'
 import { authFetch, BASE_URL } from './api'
 import { githubToRaw, isSupportedMediaUrl } from './utils/mediaUrl'
 import { PortfolioBuilderSkeleton } from './Skeleton'
+import { Button } from './components/ui/Button'
 
 const POLL_MS = 3000
 
@@ -2056,7 +2057,7 @@ function PortfolioBuilder({ onLogout, onGoToBrowse, onRepoDeleted, onRepoAnalyze
       ) : loadError ? (
         <div style={{ padding: '24px 0', display: 'flex', flexDirection: 'column', gap: '12px' }}>
           <p style={{ color: '#dc2626', fontSize: '14px', margin: 0 }}>Failed to load repositories: {loadError}</p>
-          <button onClick={loadRepos} style={{ alignSelf: 'flex-start', padding: '8px 16px', borderRadius: '8px', border: '1px solid #e5e7eb', background: 'white', cursor: 'pointer', fontSize: '13px' }}>↻ Retry</button>
+          <Button variant="outline" size="sm" onClick={loadRepos} className="self-start">↻ Retry</Button>
         </div>
       ) : analyzedRepos.length === 0 ? (
         <div style={{ padding: '24px 0', display: 'flex', flexDirection: 'column', gap: '12px' }}>
