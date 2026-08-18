@@ -447,7 +447,7 @@ Based on the structured signals provided, write 1–2 tight prose paragraphs:
 - Paragraph 2 (only if there's room within the word limit below): the one design decision that matters most and why — not an inventory of every technology used.
 
 Rules:
-- HARD LIMIT: 75 words total, excluding any technology/tool names that would appear in a separate "tech stack" list — count only the prose. Reject your own output and rewrite shorter if it exceeds 75 words. This is a short teaser; a "View Details" link elsewhere shows the fuller case study, so do not try to fit everything here.
+- HARD LIMIT: 100 words total, excluding any technology/tool names that would appear in a separate "tech stack" list — count only the prose. Reject your own output and rewrite shorter if it exceeds 100 words. This is a short teaser; a "View Details" link elsewhere shows the fuller case study, so do not try to fit everything here.
 - Write in third person ("This system..." / "The platform..." / "The application...")
 - Lead with the use case, not the tech stack
 - Name a technology only when it supports a point about the design — not as a checklist. Keep jargon light.

@@ -1025,14 +1025,14 @@ router.post('/:id/generate-project-descriptions', authMiddleware, generationLimi
         console.error(`[generate-project-descriptions] ${r.name}:`, err.message);
       }
 
-      // Hard safety net behind the prompt's own 75-word instruction — models
+      // Hard safety net behind the prompt's own 100-word instruction — models
       // don't always obey a word count exactly. Truncated once here, at the
       // single point every consumer (public portfolio page, GitHub-published
       // README, the per-project README) reads content_json.narrative.projects
       // from — so all three are guaranteed to show the same capped text
       // rather than each needing its own truncation logic. The full
       // "View Details"/case-study content elsewhere is unaffected.
-      return { ...existing, description: truncateWords(description, 75) };
+      return { ...existing, description: truncateWords(description, 100) };
     }));
 
     const updatedNarrative = {
