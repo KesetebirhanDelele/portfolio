@@ -475,25 +475,31 @@ function PortfolioBuilder({ onLogout, onGoToBrowse, onRepoDeleted, onRepoAnalyze
   const autoStartedRef = useRef(false)
   const autoSelectedIdsRef = useRef(new Set())
 
+  // Set when an existing portfolio is found on mount and awaiting the
+  // user's explicit choice (see below) — { portfolioId, title, updatedAt }.
+  const [existingPortfolioPrompt, setExistingPortfolioPrompt] = useState(null)
+  const [checkingExistingPortfolio, setCheckingExistingPortfolio] = useState(true)
+
   useEffect(() => {
     loadRepos()
   }, [])
 
-  // Load an existing portfolio on mount instead of always creating a new
-  // one — previously `portfolio` state always started null, so the
-  // auto-start effect below unconditionally created a brand-new draft on
-  // every page load, silently abandoning whatever draft (and any
-  // in-progress narrative generation) existed before. Confirmed live: one
-  // user ended up with 3 separate empty "My Portfolio" drafts, none of
-  // which ever finished narrative generation, because each fresh page load
-  // replaced the previous attempt before generation could complete. See
-  // PROGRESS.md M92.
+  // Check for an existing portfolio on mount, but — unlike the original
+  // M92 fix — don't silently auto-load it. M92 fixed a real bug (every
+  // page load unconditionally created a brand-new portfolio, orphaning
+  // whatever draft existed before — see git history), but auto-loading
+  // the most recent one unconditionally traded that bug for a different
+  // problem: the user can no longer get back to the repo-selection
+  // checklist to change their mind about which projects/repos to combine
+  // without an existing portfolio hijacking every visit. This now asks
+  // instead of deciding either way — see chooseExistingPortfolio /
+  // chooseStartFresh below and the choice-screen render further down.
   //
   // autoStartedRef is set true immediately (before the async fetch below
   // resolves) so the auto-start effect can't race ahead and create a
-  // duplicate while this check is still in flight — reset back to false
-  // only if no existing portfolio was found, so first-time users still get
-  // the normal auto-create flow.
+  // duplicate while this check — or the user's choice — is still pending.
+  // Reset to false only once we know for certain no choice is needed (no
+  // existing portfolio) or the user explicitly picked "start fresh".
   const existingPortfolioCheckedRef = useRef(false)
   useEffect(() => {
     if (existingPortfolioCheckedRef.current) return
@@ -504,20 +510,47 @@ function PortfolioBuilder({ onLogout, onGoToBrowse, onRepoDeleted, onRepoAnalyze
       const json = res ? await res.json() : null
       if (!json?.success || !json.data?.length) {
         autoStartedRef.current = false // no existing portfolio — let auto-start create one
+        setCheckingExistingPortfolio(false)
         return
       }
-      // Most recent first — backend orders by updated_at DESC.
-      const saved = await loadFullPortfolio(json.data[0].portfolioId)
-      if (saved?.narrativeStatus === 'generating') {
-        // A previous session's generation never got polled to completion
-        // (tab closed mid-generation). Re-triggering is simplistic — a
-        // fresh generate-narrative call, not literally resuming the same
-        // in-flight one — but harmless: narrative generation is a single
-        // fast call, and this only fires for that rare interrupted window.
-        handleGenerateNarrative(saved)
-      }
+      // Most recent first — backend orders by updated_at DESC. Only the
+      // summary needed for the prompt — full hydration happens in
+      // chooseExistingPortfolio, only if the user actually picks it.
+      const summary = json.data[0]
+      setExistingPortfolioPrompt({
+        portfolioId: summary.portfolioId,
+        title: summary.title || 'My Portfolio',
+        updatedAt: summary.updatedAt,
+        repositoryCount: summary.repositoryCount || 0,
+        narrativeStatus: summary.narrativeStatus,
+      })
+      setCheckingExistingPortfolio(false)
     })()
   }, [])
+
+  async function chooseExistingPortfolio() {
+    if (!existingPortfolioPrompt) return
+    const saved = await loadFullPortfolio(existingPortfolioPrompt.portfolioId)
+    setExistingPortfolioPrompt(null)
+    if (saved?.narrativeStatus === 'generating') {
+      // A previous session's generation never got polled to completion
+      // (tab closed mid-generation). Re-triggering is simplistic — a
+      // fresh generate-narrative call, not literally resuming the same
+      // in-flight one — but harmless: narrative generation is a single
+      // fast call, and this only fires for that rare interrupted window.
+      handleGenerateNarrative(saved)
+    }
+  }
+
+  function chooseStartFresh() {
+    setExistingPortfolioPrompt(null)
+    // Let auto-start run if this visit came from a fresh auto-import
+    // (autoStart prop true) — same as the original first-time-user path.
+    // For a normal returning visit (autoStart false) this just clears the
+    // way for Step 1's repo-selection checklist to render, same outcome
+    // as the pre-existing "+ Build another portfolio" reset button.
+    autoStartedRef.current = false
+  }
 
   // Stop polling when component unmounts
   useEffect(() => {
@@ -1286,6 +1319,56 @@ function PortfolioBuilder({ onLogout, onGoToBrowse, onRepoDeleted, onRepoAnalyze
   const analyzedRepos = importedRepos
     .filter(r => ['completed', 'partial'].includes(analysisMap[r.id]?.status))
     .sort((a, b) => (analysisMap[b.id]?.confidenceScore ?? 0) - (analysisMap[a.id]?.confidenceScore ?? 0))
+
+  // ── Step 0: Existing portfolio found — ask, don't decide automatically ─────
+  if (checkingExistingPortfolio) {
+    return <PortfolioBuilderSkeleton />
+  }
+  if (existingPortfolioPrompt) {
+    const updatedLabel = existingPortfolioPrompt.updatedAt
+      ? new Date(existingPortfolioPrompt.updatedAt).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })
+      : null
+    const statusLabel = existingPortfolioPrompt.narrativeStatus === 'completed'
+      ? 'narrative generated'
+      : existingPortfolioPrompt.narrativeStatus === 'generating'
+        ? 'narrative still generating'
+        : 'narrative not yet generated'
+    return (
+      <div style={{ maxWidth: '520px', margin: '40px auto', padding: '8px 0' }}>
+        <div style={{ padding: '28px', backgroundColor: '#fff', border: '1px solid #e5e7eb', borderRadius: '14px' }}>
+          <h2 style={{ margin: '0 0 8px', fontSize: '18px', fontWeight: '700', color: '#0f172a' }}>
+            You have an existing portfolio
+          </h2>
+          <p style={{ margin: '0 0 22px', fontSize: '13px', color: '#6b7280', lineHeight: 1.6 }}>
+            <strong>{existingPortfolioPrompt.title}</strong> — {existingPortfolioPrompt.repositoryCount} repo{existingPortfolioPrompt.repositoryCount === 1 ? '' : 's'}, {statusLabel}
+            {updatedLabel && <>, last updated {updatedLabel}</>}.
+          </p>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+            <button
+              onClick={chooseExistingPortfolio}
+              style={{
+                padding: '12px 18px', borderRadius: '10px', border: 'none', cursor: 'pointer',
+                fontSize: '14px', fontWeight: '700', color: '#fff',
+                background: 'linear-gradient(135deg, #4f46e5, #7c3aed)',
+              }}
+            >
+              Continue editing this portfolio →
+            </button>
+            <button
+              onClick={chooseStartFresh}
+              style={{
+                padding: '12px 18px', borderRadius: '10px',
+                border: '1px solid #d1d5db', backgroundColor: '#fff',
+                color: '#374151', fontWeight: '600', fontSize: '14px', cursor: 'pointer',
+              }}
+            >
+              Start fresh — choose different repos/projects
+            </button>
+          </div>
+        </div>
+      </div>
+    )
+  }
 
   // ── Step 4: Published ──────────────────────────────────────────────────────
   if (publicUrl) {
