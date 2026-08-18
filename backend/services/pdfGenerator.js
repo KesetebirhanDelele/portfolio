@@ -546,11 +546,16 @@ function buildResumeHtml({
   const patterns      = allPatterns(repos);
   const skillsByCategory = aggregateSkills(repos, topSkills, patterns);
   const projectBlocks = buildProjectBlocks(projects, repos);
-  // A resume-sourced summary (uploaded LinkedIn PDF) takes priority when
-  // present — shown first, in the person's own words — with the repo-derived
-  // synthesis following as supporting detail rather than replacing it.
+  // A resume-sourced summary (uploaded LinkedIn PDF) replaces the repo-derived
+  // synthesis when present, rather than both being shown stacked — same
+  // resume-only-if-available rule applied consistently on the public
+  // portfolio page and the GitHub-published README (see PROGRESS.md M92).
+  // Note: unlike those two, this repo-derived fallback (buildPersonSummary)
+  // is a separately-templated summary, not narrative.narrative itself — a
+  // pre-existing difference in this PDF path, left as-is here since unifying
+  // the two generation methods is a larger change than this fix's scope.
   const repoSummary   = buildPersonSummary(repos, experience, careerSignals);
-  const summaryParagraphs = [resumeSummary?.trim(), repoSummary].filter(Boolean);
+  const summaryParagraphs = [resumeSummary?.trim() || repoSummary].filter(Boolean);
 
   const displayName     = profile.fullName || title || 'Developer Portfolio';
   const displayRoleLine = buildProfessionalHeadline(repos, careerSignals, experience, profile.headline || headline);

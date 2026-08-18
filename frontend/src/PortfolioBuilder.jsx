@@ -134,7 +134,7 @@ const PREV_CATS = {
   Other:    { bg: '#f3f4f6', color: '#374151' },
 }
 
-function MiniPreview({ headline, narrative, topSkills, projects, repos, analysisMap, profile, engineeringStrengths, linkedin }) {
+function MiniPreview({ headline, narrative, topSkills, projects, repos, analysisMap, profile, linkedin }) {
   const displayName = profile?.fullName || 'Your Portfolio'
   const displayHeadline = profile?.headline || headline
   const initials = displayName.split(' ').slice(0, 2).map(w => w[0]).join('').toUpperCase()
@@ -210,34 +210,24 @@ function MiniPreview({ headline, narrative, topSkills, projects, repos, analysis
         </div>
       </div>
 
-      {/* About Me */}
-      {narrative && (
-        <div style={{ padding: '14px 20px', borderBottom: '1px solid #e5e7eb' }}>
-          <h3 style={{ margin: '0 0 7px', fontSize: '10px', fontWeight: '700', color: '#0f172a', textTransform: 'uppercase', letterSpacing: '1.5px' }}>
-            About Me
-          </h3>
-          <p style={{ margin: 0, fontSize: '11px', color: '#475569', lineHeight: 1.65,
-            overflow: 'hidden', display: '-webkit-box', WebkitLineClamp: 3, WebkitBoxOrient: 'vertical' }}>
-            {narrative}
-          </p>
-        </div>
-      )}
-
-      {/* Engineering Strengths */}
-      {engineeringStrengths?.length > 0 && (
-        <div style={{ padding: '14px 20px', borderBottom: '1px solid #e5e7eb' }}>
-          <h3 style={{ margin: '0 0 9px', fontSize: '10px', fontWeight: '700', color: '#0f172a', textTransform: 'uppercase', letterSpacing: '1.5px' }}>
-            Engineering Strengths
-          </h3>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
-            {engineeringStrengths.slice(0, 6).map((s, i) => (
-              <div key={i} style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '11px', color: '#166534' }}>
-                <span style={{ fontWeight: '700', flexShrink: 0 }}>✓</span>{s}
-              </div>
-            ))}
+      {/* About Me — resume summary replaces the AI narrative when a resume
+          is on file, not shown alongside it, matching the exact rule the
+          public portfolio page and the GitHub-published README both apply
+          to the same underlying fields. See PROGRESS.md M92. */}
+      {(() => {
+        const effectiveSummary = linkedin?.summary?.trim() || narrative
+        return effectiveSummary && (
+          <div style={{ padding: '14px 20px', borderBottom: '1px solid #e5e7eb' }}>
+            <h3 style={{ margin: '0 0 7px', fontSize: '10px', fontWeight: '700', color: '#0f172a', textTransform: 'uppercase', letterSpacing: '1.5px' }}>
+              About Me
+            </h3>
+            <p style={{ margin: 0, fontSize: '11px', color: '#475569', lineHeight: 1.65,
+              overflow: 'hidden', display: '-webkit-box', WebkitLineClamp: 3, WebkitBoxOrient: 'vertical' }}>
+              {effectiveSummary}
+            </p>
           </div>
-        </div>
-      )}
+        )
+      })()}
 
       {/* Core Technologies */}
       {topSkills.length > 0 && (
@@ -487,6 +477,46 @@ function PortfolioBuilder({ onLogout, onGoToBrowse, onRepoDeleted, onRepoAnalyze
 
   useEffect(() => {
     loadRepos()
+  }, [])
+
+  // Load an existing portfolio on mount instead of always creating a new
+  // one — previously `portfolio` state always started null, so the
+  // auto-start effect below unconditionally created a brand-new draft on
+  // every page load, silently abandoning whatever draft (and any
+  // in-progress narrative generation) existed before. Confirmed live: one
+  // user ended up with 3 separate empty "My Portfolio" drafts, none of
+  // which ever finished narrative generation, because each fresh page load
+  // replaced the previous attempt before generation could complete. See
+  // PROGRESS.md M92.
+  //
+  // autoStartedRef is set true immediately (before the async fetch below
+  // resolves) so the auto-start effect can't race ahead and create a
+  // duplicate while this check is still in flight — reset back to false
+  // only if no existing portfolio was found, so first-time users still get
+  // the normal auto-create flow.
+  const existingPortfolioCheckedRef = useRef(false)
+  useEffect(() => {
+    if (existingPortfolioCheckedRef.current) return
+    existingPortfolioCheckedRef.current = true
+    autoStartedRef.current = true
+    ;(async () => {
+      const res = await authFetch(`${BASE_URL}/api/portfolios`, {}, onLogout)
+      const json = res ? await res.json() : null
+      if (!json?.success || !json.data?.length) {
+        autoStartedRef.current = false // no existing portfolio — let auto-start create one
+        return
+      }
+      // Most recent first — backend orders by updated_at DESC.
+      const saved = await loadFullPortfolio(json.data[0].portfolioId)
+      if (saved?.narrativeStatus === 'generating') {
+        // A previous session's generation never got polled to completion
+        // (tab closed mid-generation). Re-triggering is simplistic — a
+        // fresh generate-narrative call, not literally resuming the same
+        // in-flight one — but harmless: narrative generation is a single
+        // fast call, and this only fires for that rare interrupted window.
+        handleGenerateNarrative(saved)
+      }
+    })()
   }, [])
 
   // Stop polling when component unmounts
@@ -1148,13 +1178,16 @@ function PortfolioBuilder({ onLogout, onGoToBrowse, onRepoDeleted, onRepoAnalyze
     }
   }
 
-  async function handleEditPortfolio() {
-    if (!portfolio?.portfolioId) return
-    // Reload saved portfolio data so the editor has up-to-date profile + narrative
-    const res = await authFetch(`${BASE_URL}/api/portfolios/${portfolio.portfolioId}`, {}, onLogout)
-    if (!res) return
+  // Fetches a portfolio by id and hydrates every piece of editor state from
+  // it (narrative, profile, linkedin, media, selection, portfolio record
+  // itself). Shared by handleEditPortfolio (explicit "Edit" click on an
+  // already-loaded portfolio) and the mount-time load below (finding an
+  // existing portfolio before deciding whether to create a new one).
+  async function loadFullPortfolio(portfolioId) {
+    const res = await authFetch(`${BASE_URL}/api/portfolios/${portfolioId}`, {}, onLogout)
+    if (!res) return null
     const json = await res.json()
-    if (!json.success) return
+    if (!json.success) return null
 
     const saved = json.data
     if (saved.narrative) {
@@ -1180,8 +1213,25 @@ function PortfolioBuilder({ onLogout, onGoToBrowse, onRepoDeleted, onRepoAnalyze
       )
       setRepoMedia(clean)
     }
-    setPortfolio(prev => ({ ...prev, status: saved.status, visibility: saved.visibility }))
-    setNarrativeStatus('completed')
+    setTitle(saved.title || 'My Portfolio')
+    setSelected(new Set((saved.repos || []).map(r => r.repositoryId)))
+    setPortfolio({
+      portfolioId: saved.portfolioId, title: saved.title, slug: saved.slug,
+      status: saved.status, visibility: saved.visibility,
+      repositoryIds: (saved.repos || []).map(r => r.repositoryId),
+      createdAt: saved.createdAt,
+    })
+    // Real status, not hardcoded — a mount-time load (see the effect below)
+    // can land on a portfolio that never finished generating, whereas the
+    // original handleEditPortfolio call site could safely assume 'completed'
+    // because it was only ever reachable from a UI state that already implied it.
+    setNarrativeStatus(saved.narrativeStatus)
+    return saved
+  }
+
+  async function handleEditPortfolio() {
+    if (!portfolio?.portfolioId) return
+    await loadFullPortfolio(portfolio.portfolioId)
     setPublicUrl(null)   // return to Step 3 editor
   }
 
@@ -1944,7 +1994,6 @@ function PortfolioBuilder({ onLogout, onGoToBrowse, onRepoDeleted, onRepoAnalyze
               repos={selectedRepos}
               analysisMap={analysisMap}
               profile={profile}
-              engineeringStrengths={narrativeData.engineering_strengths || []}
               linkedin={linkedinData}
             />
           </div>

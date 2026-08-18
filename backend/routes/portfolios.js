@@ -34,6 +34,17 @@ async function extractPdfText(buffer) {
   return pages.join('\n');
 }
 
+// Word count excludes tech-stack names by construction, not by parsing —
+// technologies are a separate field (repo.analysis.technologies /
+// caseStudy.tools) never embedded in this description string, so a plain
+// whitespace word count is already counting prose only.
+function truncateWords(text, maxWords) {
+  if (!text) return text;
+  const words = text.trim().split(/\s+/);
+  if (words.length <= maxWords) return text;
+  return words.slice(0, maxWords).join(' ') + '…';
+}
+
 function generateSlug(title) {
   const base = title
     .toLowerCase()
@@ -229,7 +240,7 @@ router.get('/public/:slug', async (req, res) => {
     const repositoryIds = portfolio.content_json?.repository_ids || [];
 
     const reposResult = await pool.query(
-      `SELECT r.id AS repo_id, r.name, r.full_name, r.description,
+      `SELECT r.id AS repo_id, r.name, r.full_name, r.provider, r.description,
               r.primary_language, r.stars_count, r.forks_count, r.topics, r.image_url,
               a.confidence_score, a.skills_json, a.summary_json,
               da.code_intelligence_json
@@ -255,6 +266,7 @@ router.get('/public/:slug', async (req, res) => {
     const repos = reposResult.rows.map(r => ({
       name:        r.name,
       fullName:    r.full_name,
+      provider:    r.provider,
       description: r.description,
       language:    r.primary_language,
       stars:       r.stars_count,
@@ -286,7 +298,6 @@ router.get('/public/:slug', async (req, res) => {
         narrative:            narrative.narrative            || null,
         topSkills:            narrative.top_skills           || [],
         projects:             narrative.projects             || [],
-        engineeringStrengths: narrative.engineering_strengths || [],
         careerSignals:        narrative.career_signals        || [],
         profile,
         linkedin,
@@ -1014,7 +1025,14 @@ router.post('/:id/generate-project-descriptions', authMiddleware, generationLimi
         console.error(`[generate-project-descriptions] ${r.name}:`, err.message);
       }
 
-      return { ...existing, description };
+      // Hard safety net behind the prompt's own 75-word instruction — models
+      // don't always obey a word count exactly. Truncated once here, at the
+      // single point every consumer (public portfolio page, GitHub-published
+      // README, the per-project README) reads content_json.narrative.projects
+      // from — so all three are guaranteed to show the same capped text
+      // rather than each needing its own truncation logic. The full
+      // "View Details"/case-study content elsewhere is unaffected.
+      return { ...existing, description: truncateWords(description, 75) };
     }));
 
     const updatedNarrative = {

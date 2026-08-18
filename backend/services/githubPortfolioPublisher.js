@@ -189,10 +189,14 @@ ${summary}
 
 function buildPortfolioReadme(narrative, profile, assigned, resumeSummary, projectImages = {}) {
   const badges = buildSkillBadges(narrative.top_skills);
-  // Resume-sourced summary (the person's own words) leads; the AI-synthesized
-  // repo narrative follows as supporting detail — same priority as the PDF
-  // and public portfolio page (M63).
-  const about = [resumeSummary?.trim(), narrative.narrative].filter(Boolean).join('\n\n');
+  // Resume-sourced summary (the person's own words) replaces the AI-synthesized
+  // narrative when a resume is on file — not stacked alongside it — so the
+  // published repo shows exactly one professional summary, matching the
+  // public portfolio page's logic exactly (both apply this same rule to the
+  // same underlying resumeSummary/narrative.narrative fields, so they can't
+  // diverge). Falls back to the AI narrative only when no resume exists. See
+  // PROGRESS.md M92.
+  const about = resumeSummary?.trim() || narrative.narrative || '';
   const projectCards = assigned
     .map(({ project, folder }) => buildProjectCard(project, folder, projectImages[project.repoName]))
     .join('\n');

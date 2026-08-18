@@ -129,7 +129,6 @@ I approach software development by focusing on clean architecture, thoughtful sy
 
 === SKILLS AND SIGNALS ===
 - top_skills: deduplicate across repos, rank by confidence descending, max 10
-- engineering_strengths: 4–8 strengths evidenced by the analysis — only include what is clearly present
 - career_signals: score 1–5 per domain, only include score >= 2: AI Engineering, Backend Engineering, System Design, Frontend Engineering, DevOps, Security, Data Engineering
 
 PROHIBITED PHRASES (reject if present):
@@ -145,7 +144,6 @@ Return ONLY valid JSON with this exact structure:
   "projects": [
     { "repoName": "my-app", "oneLiner": "One sentence on what this project does and who it's for — not a tech-stack recap." }
   ],
-  "engineering_strengths": ["AI Integration", "Backend API Development", "System Architecture"],
   "career_signals": [
     { "domain": "AI Engineering", "score": 5 },
     { "domain": "Backend Engineering", "score": 4 }
@@ -444,22 +442,21 @@ async function extractLinkedInProfile(rawText) {
 
 const PROJECT_DESCRIPTION_SYSTEM_PROMPT = `You are a technical writer creating a professional project description for a developer portfolio. The primary reader is a recruiter or hiring manager — not an engineer doing a code review — so it has to make sense to someone skimming quickly, not just someone fluent in the tech stack.
 
-Based on the structured signals provided, write exactly 2–3 prose paragraphs:
+Based on the structured signals provided, write 1–2 tight prose paragraphs:
 - Paragraph 1: The use case — what real-world problem this solves and who it's for. Lead with this, in plain language. A reader should understand what the project DOES before any technology is named.
-- Paragraph 2: How the implementation makes it effective — the specific design decisions that matter, and why they matter (e.g. a queue exists to handle concurrent load, a cache exists to cut response time, an integration exists to keep data in sync). Not an inventory of every technology used.
-- Paragraph 3 (only if there is a genuine, evidenced accomplishment or measurable impact in the input — omit otherwise): concrete outcomes or standout capabilities.
+- Paragraph 2 (only if there's room within the word limit below): the one design decision that matters most and why — not an inventory of every technology used.
 
 Rules:
+- HARD LIMIT: 75 words total, excluding any technology/tool names that would appear in a separate "tech stack" list — count only the prose. Reject your own output and rewrite shorter if it exceeds 75 words. This is a short teaser; a "View Details" link elsewhere shows the fuller case study, so do not try to fit everything here.
 - Write in third person ("This system..." / "The platform..." / "The application...")
 - Lead with the use case, not the tech stack
-- Name a technology only when it supports a point about the design — not as a checklist. Keep jargon light; prefer plain descriptions of what something accomplishes over naming every pattern.
+- Name a technology only when it supports a point about the design — not as a checklist. Keep jargon light.
 - Avoid architecture-report phrasing ("N architectural layers", "M interconnected components", "spans across") — this is a portfolio, not an audit
-- Each paragraph: 2–4 sentences
 - No bullet points, no section headings — prose only
 - Do not open the first sentence with the project name
 
 Return ONLY valid JSON:
-{ "description": "Paragraph 1.\\n\\nParagraph 2.\\n\\nParagraph 3." }`;
+{ "description": "Paragraph 1.\\n\\nParagraph 2 (optional)." }`;
 
 async function generateProjectDescription({
   repoName, hookSentence, whatItDoes, probableDomain,

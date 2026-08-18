@@ -95,7 +95,7 @@ function getYearsExperience(linkedin, profile) {
 }
 
 // ─── Sidebar ──────────────────────────────────────────────────────────────────
-function Sidebar({ title, headline, topSkills, githubUsername, profile, engineeringStrengths, careerSignals, repos, repoCount, className = '' }) {
+function Sidebar({ title, headline, topSkills, githubUsername, profile, careerSignals, repos, repoCount, className = '' }) {
   const grouped     = groupByCategory(topSkills)
   const displayName = profile?.fullName || title || 'Developer'
   const displayHead = profile?.headline || headline
@@ -174,20 +174,6 @@ function Sidebar({ title, headline, topSkills, githubUsername, profile, engineer
               </a>
             </Row>
           )}
-        </div>
-      )}
-
-      {/* Engineering Strengths */}
-      {engineeringStrengths?.length > 0 && (
-        <div>
-          <Label>Engineering Skills</Label>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '5px' }}>
-            {engineeringStrengths.map((s, i) => (
-              <div key={i} style={{ display: 'flex', alignItems: 'center', gap: '7px', fontSize: '12px', color: '#166534' }}>
-                <span style={{ fontWeight: '700', flexShrink: 0 }}>✓</span>{s}
-              </div>
-            ))}
-          </div>
         </div>
       )}
 
@@ -495,22 +481,37 @@ function ProjectCard({ repo, oneLiner, aiDescription }) {
       {/* Details */}
       <div style={{ flex: 1, padding: '14px 16px', minWidth: 0 }}>
 
-        {/* 1. Title — links to GitHub */}
-        <a
-          href={repo.fullName ? `https://github.com/${repo.fullName}` : '#'}
-          target="_blank"
-          rel="noreferrer"
-          style={{
+        {/* 1. Title — links to GitHub only for real GitHub-imported repos.
+               Colaberry-sourced repos store the scraped project title in
+               `fullName` (same value as `name`), not a real "owner/repo"
+               path, so linking unconditionally on fullName produced a
+               broken github.com URL for every Colaberry project — there is
+               no GitHub source repo to link to for those. See PROGRESS.md M92. */}
+        {repo.provider === 'github' && repo.fullName ? (
+          <a
+            href={`https://github.com/${repo.fullName}`}
+            target="_blank"
+            rel="noreferrer"
+            style={{
+              margin: '0 0 6px', padding: 0,
+              fontSize: '15px', fontWeight: '700', color: T, textAlign: 'left',
+              display: 'block', lineHeight: 1.3,
+              textDecoration: 'none',
+              transition: 'color 0.15s',
+            }}
+            className="proj-link"
+          >
+            {formatRepoName(repo.name)}
+          </a>
+        ) : (
+          <p style={{
             margin: '0 0 6px', padding: 0,
             fontSize: '15px', fontWeight: '700', color: T, textAlign: 'left',
-            display: 'block', lineHeight: 1.3,
-            textDecoration: 'none',
-            transition: 'color 0.15s',
-          }}
-          className="proj-link"
-        >
-          {formatRepoName(repo.name)}
-        </a>
+            lineHeight: 1.3,
+          }}>
+            {formatRepoName(repo.name)}
+          </p>
+        )}
 
         {/* 2. Summary — always show overview, expand for full AI analysis */}
         {collapseText && (
@@ -588,7 +589,7 @@ function ProjectCard({ repo, oneLiner, aiDescription }) {
               {expanded ? 'Show less ↑' : 'Show more ↓'}
             </button>
           )}
-          {repo.fullName && (
+          {repo.provider === 'github' && repo.fullName && (
             <a
               href={`https://github.com/${repo.fullName}`}
               target="_blank"
@@ -867,12 +868,17 @@ export default function PublicPortfolio({ slug }) {
 
   const {
     title, headline, narrative, topSkills = [], repos = [], projects = [],
-    publishedAt, engineeringStrengths = [], careerSignals = [], profile = {},
+    publishedAt, careerSignals = [], profile = {},
     linkedin = null,
   } = portfolio
 
-  // Derive GitHub username from any repo fullName (e.g. "username/reponame")
-  const githubUsername = repos.find(r => r.fullName)?.fullName?.split('/')?.[0] || null
+  // Derive GitHub username from a real GitHub-imported repo's fullName
+  // ("owner/reponame") only — Colaberry-sourced repos store the same value
+  // in both `name` and `fullName` (it's a scraped project title, not a
+  // GitHub path; see colaberryImport.js), so without the provider check a
+  // Colaberry-only portfolio would derive a garbage "username" from that
+  // title and build broken github.com links from it. See PROGRESS.md M92.
+  const githubUsername = repos.find(r => r.provider === 'github' && r.fullName)?.fullName?.split('/')?.[0] || null
 
   // Rank repos: highest confidence first, then featured (top 2) first
   const rankedRepos = [...repos].sort((a, b) =>
@@ -925,7 +931,6 @@ export default function PublicPortfolio({ slug }) {
           topSkills={topSkills}
           githubUsername={githubUsername}
           profile={profile}
-          engineeringStrengths={engineeringStrengths}
           careerSignals={careerSignals}
           repos={repos}
           repoCount={repos.length}
@@ -980,15 +985,14 @@ export default function PublicPortfolio({ slug }) {
 
           {/* ── Professional Summary ───────────────────────────────── */}
           <Section id="overview" icon="👤" title="Professional Summary">
-            {/* Resume-sourced summary (if a resume was uploaded) takes priority —
-                shown first, in the person's own words, with the repo-derived
-                narrative following as supporting detail rather than replacing it. */}
-            {linkedin?.summary?.trim() && (
-              <p style={{ margin: '0 0 14px', fontSize: '13px', color: TS, lineHeight: 1.7 }}>
-                {linkedin.summary.trim()}
-              </p>
-            )}
-            <SummaryText text={narrative || (linkedin?.summary?.trim() ? '' : 'No summary available.')} />
+            {/* Resume-sourced summary (the person's own words) replaces the
+                AI-synthesized narrative when a resume is on file — not shown
+                alongside it — so there's exactly one summary, not two. Falls
+                back to the AI narrative only when no resume exists. The
+                GitHub-published README (githubPortfolioPublisher.js) applies
+                this identical rule to the same underlying fields, so the two
+                can't diverge. See PROGRESS.md M92. */}
+            <SummaryText text={linkedin?.summary?.trim() || narrative || 'No summary available.'} />
 
             {/* Portfolio Highlights row */}
             <div className="pp-highlights" style={{
