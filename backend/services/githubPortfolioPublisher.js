@@ -354,4 +354,4 @@ async function publishPortfolioAsGithubRepo({ token, owner, repoName, narrative,
   };
 }
 
-module.exports = { publishPortfolioAsGithubRepo, GENERATED_PORTFOLIO_TOPIC };
+module.exports = { publishPortfolioAsGithubRepo, GENERATED_PORTFOLIO_TOPIC, assignProjectFolders };

@@ -380,7 +380,7 @@ function Section({ id, icon, title, children, right }) {
 
 
 // ─── Project card ─────────────────────────────────────────────────────────────
-function ProjectCard({ repo, oneLiner, aiDescription }) {
+function ProjectCard({ repo, oneLiner, aiDescription, githubProjectUrl }) {
   const [hov, setHov]                   = useState(false)
   const [expanded, setExpanded]         = useState(false)
   const [gifHov, setGifHov]             = useState(false)
@@ -602,6 +602,28 @@ function ProjectCard({ repo, oneLiner, aiDescription }) {
               }}
             >
               View on GitHub →
+            </a>
+          )}
+          {/* Colaberry projects have no real GitHub source repo to link to
+              (see the title-link comment above) — but once the portfolio
+              itself has been pushed to GitHub, each project gets a real
+              generated README there. githubProjectUrl is only present once
+              that publish has happened (backend/routes/portfolios.js's
+              public route computes it from content_json.github_publish,
+              which only exists after a successful push). See PROGRESS.md M93. */}
+          {repo.provider === 'colaberry' && githubProjectUrl && (
+            <a
+              href={githubProjectUrl}
+              target="_blank"
+              rel="noreferrer"
+              style={{
+                display: 'inline-flex', alignItems: 'center', gap: '5px',
+                padding: '5px 12px', borderRadius: '6px', fontSize: '11px', fontWeight: '600',
+                border: `1px solid ${BD}`, color: T, backgroundColor: '#fff',
+                textDecoration: 'none',
+              }}
+            >
+              View Full Project →
             </a>
           )}
         </div>
@@ -1028,7 +1050,7 @@ export default function PublicPortfolio({ slug }) {
             <Section id="projects" icon="🚀" title="Projects">
               {rankedRepos.map((repo, i) => {
                 const match = projects.find(p => p.repoName === repo.name)
-                return <ProjectCard key={i} repo={repo} oneLiner={match?.oneLiner} aiDescription={match?.description} />
+                return <ProjectCard key={i} repo={repo} oneLiner={match?.oneLiner} aiDescription={match?.description} githubProjectUrl={match?.githubProjectUrl} />
               })}
             </Section>
           )}

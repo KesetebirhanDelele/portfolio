@@ -8,7 +8,7 @@ const { generatePortfolioNarrative, extractLinkedInProfile, generateProjectDescr
 const { generatePortfolioPdf } = require('../services/pdfGenerator');
 const { registerHeavyTaskHandler, runHeavyTask } = require('../services/heavyTaskQueue');
 const { TECH_CATEGORIES, TECH_LABELS } = require('../services/techMaps');
-const { publishPortfolioAsGithubRepo } = require('../services/githubPortfolioPublisher');
+const { publishPortfolioAsGithubRepo, assignProjectFolders } = require('../services/githubPortfolioPublisher');
 const { getGithubInfo } = require('../services/githubTokenResolver');
 const { getResumeData, saveResumeData, deleteResumeData } = require('../services/resumeDataResolver');
 
@@ -289,6 +289,26 @@ router.get('/public/:slug', async (req, res) => {
     const profile   = portfolio.content_json?.profile   || {};
     const linkedin  = await getResumeData(portfolio.user_id);
 
+    // If this portfolio has been pushed to GitHub (content_json.github_publish,
+    // set by POST /:id/publish-github-repo), attach each project's real
+    // per-project README URL — reuses the exact same folder-naming logic
+    // publishPortfolioAsGithubRepo used when it wrote those files, so the
+    // link is guaranteed to point at a real path rather than a guessed one.
+    // This is what lets the live page offer "View Full Project" for
+    // Colaberry-sourced projects, which never had a real GitHub source repo
+    // to link to in the first place. See PROGRESS.md M93.
+    const githubPublish = portfolio.content_json?.github_publish || null;
+    const assignedFolders = githubPublish ? assignProjectFolders(narrative.projects || []) : [];
+    const projectsWithGithubUrl = (narrative.projects || []).map(p => {
+      if (!githubPublish) return p;
+      const match = assignedFolders.find(a => a.project.repoName === p.repoName);
+      if (!match) return p;
+      return {
+        ...p,
+        githubProjectUrl: `https://github.com/${githubPublish.owner}/${githubPublish.repoName}/blob/main/${match.folder}/README.md`,
+      };
+    });
+
     return res.status(200).json({
       success: true,
       data: {
@@ -297,7 +317,7 @@ router.get('/public/:slug', async (req, res) => {
         headline:             narrative.headline             || null,
         narrative:            narrative.narrative            || null,
         topSkills:            narrative.top_skills           || [],
-        projects:             narrative.projects             || [],
+        projects:             projectsWithGithubUrl,
         careerSignals:        narrative.career_signals        || [],
         profile,
         linkedin,
@@ -949,6 +969,17 @@ router.post('/:id/publish-github-repo', authMiddleware, generationLimiter, async
     const { repoUrl, created, projectsSynced, projectsRemoved } = await publishPortfolioAsGithubRepo({
       token, owner, repoName, narrative, profile, resumeSummary, projectImages, caseStudies,
     });
+
+    // Previously only returned once in this response and never persisted —
+    // the live public portfolio page (a separate, later request) had no way
+    // to know a GitHub repo existed at all, so it could never link to it.
+    // Stored here so GET /public/:slug can build per-project "View Full
+    // Project" links (see below) any time after this publish, not just in
+    // the moment right after clicking the button. See PROGRESS.md M93.
+    await pool.query(
+      `UPDATE portfolios SET content_json = jsonb_set(content_json, '{github_publish}', $1::jsonb), updated_at = NOW() WHERE id = $2`,
+      [JSON.stringify({ owner, repoName }), id]
+    );
 
     return res.status(200).json({ success: true, data: { repoUrl, created, projectsSynced, projectsRemoved } });
   } catch (err) {
