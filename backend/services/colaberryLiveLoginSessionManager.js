@@ -4,7 +4,14 @@ const pool = require('../db/postgres');
 const { encrypt: sharedEncrypt, decrypt: sharedDecrypt } = require('./encryption');
 
 const IMAGE = 'colaberry-live-login';
-const MAX_CONCURRENT_SESSIONS = 5;
+// Was 5 — but at --memory=1024m per session (see the docker run call below),
+// 5 concurrent sessions can request up to 5120MB, more than this host's
+// entire 3.7GB of RAM (measured: ~2.9GB available at idle, 0 swap
+// configured). 2 is the number that actually fits with real margin,
+// alongside the heavy-task queue's own memory budget (browserResourceGuard.js,
+// heavyTaskQueue.js) — both draw from the same host. Raise this only after
+// either the host gets more RAM or per-session memory drops.
+const MAX_CONCURRENT_SESSIONS = 2;
 const SESSION_TIMEOUT_MS = 10 * 60 * 1000; // matches driver.js's own safety-net timeout
 const SWEEP_INTERVAL_MS = 60 * 1000;
 

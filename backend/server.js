@@ -15,6 +15,7 @@ const portfoliosRouter      = require('./routes/portfolios');
 const searchRouter          = require('./routes/search');
 const colaberryLiveLoginRouter = require('./routes/colaberryLiveLogin');
 const colaberryImportRouter = require('./routes/colaberryImport');
+const heavyTasksRouter      = require('./routes/heavyTasks');
 const adminRouter           = require('./routes/admin');
 const healthRouter          = require('./routes/health');
 const requestTiming         = require('./middleware/requestTiming');
@@ -40,6 +41,7 @@ app.use('/api/portfolios', portfoliosRouter);
 app.use('/api/search',     searchRouter);
 app.use('/api/colaberry-login', colaberryLiveLoginRouter);
 app.use('/api/colaberry-import', colaberryImportRouter);
+app.use('/api/heavy-tasks',      heavyTasksRouter);
 app.use('/api/admin',            adminRouter);
 app.use('/api/health',           healthRouter);
 

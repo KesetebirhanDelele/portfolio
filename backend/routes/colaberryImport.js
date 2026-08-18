@@ -10,7 +10,7 @@ const {
 } = require('../services/colaberrySqlClient');
 const { scrapeColaberryProjects } = require('../services/colaberryProjectScraper');
 const { queueAnalysis } = require('../services/analysisQueue');
-const { registerHeavyTaskHandler, runHeavyTask } = require('../services/heavyTaskQueue');
+const { registerHeavyTaskHandler, enqueueHeavyTask } = require('../services/heavyTaskQueue');
 
 const router = express.Router();
 
@@ -74,9 +74,92 @@ async function getDecryptedColaberrySession(userId) {
 // Job data is { userId, projectLinks } only — no secrets. Concurrency for
 // this handler (how many Playwright browsers can run at once) is enforced
 // by heavyTaskQueue.js's worker, not here.
+//
+// Everything that used to happen in the route after awaiting the scrape
+// (image fallback, repo upsert, analysis queueing) now lives here instead —
+// since the route enqueues and returns immediately (see the POST handler
+// below), nothing is left to do that work after the fact on the request
+// path. The handler's return value becomes job.returnvalue, which
+// GET /api/heavy-tasks/:jobId/status hands back to the polling client in
+// the same { imported, failed } shape the route used to return directly.
 registerHeavyTaskHandler('colaberry-scrape', async ({ userId, projectLinks }) => {
   const storageState = await getDecryptedColaberrySession(userId);
-  return scrapeColaberryProjects(storageState, projectLinks);
+  const { succeeded, failed: scrapeFailed } = await scrapeColaberryProjects(storageState, projectLinks);
+
+  // extractProjectImage() (colaberryProjectScraper.js) reads the image from
+  // a specific DOM element on the project page and can come back empty
+  // depending on page layout — confirmed live (M64.5: 2 of 3 real projects
+  // had no DOM image). Colaberry's own catalog (ADF_Proj_Deployed.ProjectVisual,
+  // exposed via getNetworkProjects) is a second, independent image source for
+  // the same "network" projects — fall back to it so a page-layout quirk
+  // doesn't leave a project with no image at all.
+  if (succeeded.some(p => !p.imageUrl)) {
+    try {
+      const catalog = await getNetworkProjects();
+      const catalogById = new Map(catalog.map(p => [p.networkId, p.imageUrl]));
+      for (const project of succeeded) {
+        if (project.imageUrl) continue;
+        const match = project.sourceUrl.match(/\/network\/network\/(\d+)\//);
+        const networkId = match ? Number(match[1]) : null;
+        if (networkId != null && catalogById.get(networkId)) {
+          project.imageUrl = catalogById.get(networkId);
+        }
+      }
+    } catch (err) {
+      console.error('[colaberry-import] catalog image fallback failed:', err.message);
+    }
+  }
+
+  const imported = [];
+  const importFailed = [...scrapeFailed.map(f => ({ url: f.url, error: f.error }))];
+
+  for (const project of succeeded) {
+    try {
+      const result = await pool.query(
+        `INSERT INTO repositories (
+           user_id, provider, external_repo_id, name, full_name, description,
+           private, topics, readme_content, image_url, imported_at, sync_status, created_at, updated_at
+         ) VALUES ($1, 'colaberry', $2, $3, $3, $4, false, $5, $6, $7, NOW(), 'synced', NOW(), NOW())
+         ON CONFLICT (provider, external_repo_id) DO UPDATE SET
+           name             = EXCLUDED.name,
+           full_name        = EXCLUDED.full_name,
+           description      = EXCLUDED.description,
+           topics           = EXCLUDED.topics,
+           readme_content   = EXCLUDED.readme_content,
+           image_url        = EXCLUDED.image_url,
+           imported_at      = NOW(),
+           sync_status      = 'synced',
+           updated_at       = NOW()
+         RETURNING id`,
+        [
+          userId,
+          externalIdForProject(project.sourceUrl),
+          project.title,
+          project.description,
+          JSON.stringify(project.tags),
+          buildReadmeContent(project),
+          project.imageUrl || null,
+        ]
+      );
+
+      const repositoryId = result.rows[0].id;
+
+      let analysisId = null;
+      try {
+        const analysisResult = await queueAnalysis(repositoryId);
+        analysisId = analysisResult.analysisId;
+      } catch (analysisErr) {
+        console.error('[colaberry-import] analysis queue failed for', project.sourceUrl, ':', analysisErr.message);
+      }
+
+      imported.push({ repositoryId, title: project.title, analysisId });
+    } catch (err) {
+      console.error('[colaberry-import] DB upsert failed for', project.sourceUrl, ':', err.message);
+      importFailed.push({ url: project.sourceUrl, error: err.message });
+    }
+  }
+
+  return { imported, failed: importFailed };
 });
 
 // POST /api/colaberry-import — import Colaberry projects alongside the
@@ -136,100 +219,21 @@ router.post('/', authMiddleware, heavyOperationLimiter, async (req, res) => {
       }
     }
 
-    // Routed through the heavy-task queue (Tier 2) so concurrent import
-    // requests don't launch unbounded Playwright browsers on the host —
-    // see heavyTaskQueue.js. Same result shape as calling
-    // scrapeColaberryProjects directly; this request just waits its turn.
-    const { succeeded, failed: scrapeFailed } = await runHeavyTask('colaberry-scrape', { userId, projectLinks });
-
-    // extractProjectImage() (colaberryProjectScraper.js) reads the image from
-    // a specific DOM element on the project page and can come back empty
-    // depending on page layout — confirmed live (M64.5: 2 of 3 real projects
-    // had no DOM image). Colaberry's own catalog (ADF_Proj_Deployed.ProjectVisual,
-    // exposed via getNetworkProjects) is a second, independent image source for
-    // the same "network" projects — fall back to it so a page-layout quirk
-    // doesn't leave a project with no image at all.
-    if (succeeded.some(p => !p.imageUrl)) {
-      try {
-        const catalog = await getNetworkProjects();
-        const catalogById = new Map(catalog.map(p => [p.networkId, p.imageUrl]));
-        for (const project of succeeded) {
-          if (project.imageUrl) continue;
-          const match = project.sourceUrl.match(/\/network\/network\/(\d+)\//);
-          const networkId = match ? Number(match[1]) : null;
-          if (networkId != null && catalogById.get(networkId)) {
-            project.imageUrl = catalogById.get(networkId);
-          }
-        }
-      } catch (err) {
-        console.error('[colaberry-import] catalog image fallback failed:', err.message);
-      }
-    }
-
-    const imported = [];
-    const importFailed = [...scrapeFailed.map(f => ({ url: f.url, error: f.error }))];
-
-    for (const project of succeeded) {
-      try {
-        const result = await pool.query(
-          `INSERT INTO repositories (
-             user_id, provider, external_repo_id, name, full_name, description,
-             private, topics, readme_content, image_url, imported_at, sync_status, created_at, updated_at
-           ) VALUES ($1, 'colaberry', $2, $3, $3, $4, false, $5, $6, $7, NOW(), 'synced', NOW(), NOW())
-           ON CONFLICT (provider, external_repo_id) DO UPDATE SET
-             name             = EXCLUDED.name,
-             full_name        = EXCLUDED.full_name,
-             description      = EXCLUDED.description,
-             topics           = EXCLUDED.topics,
-             readme_content   = EXCLUDED.readme_content,
-             image_url        = EXCLUDED.image_url,
-             imported_at      = NOW(),
-             sync_status      = 'synced',
-             updated_at       = NOW()
-           RETURNING id`,
-          [
-            userId,
-            externalIdForProject(project.sourceUrl),
-            project.title,
-            project.description,
-            JSON.stringify(project.tags),
-            buildReadmeContent(project),
-            project.imageUrl || null,
-          ]
-        );
-
-        const repositoryId = result.rows[0].id;
-
-        let analysisId = null;
-        try {
-          const analysisResult = await queueAnalysis(repositoryId);
-          analysisId = analysisResult.analysisId;
-        } catch (analysisErr) {
-          console.error('[colaberry-import] analysis queue failed for', project.sourceUrl, ':', analysisErr.message);
-        }
-
-        imported.push({ repositoryId, title: project.title, analysisId });
-      } catch (err) {
-        console.error('[colaberry-import] DB upsert failed for', project.sourceUrl, ':', err.message);
-        importFailed.push({ url: project.sourceUrl, error: err.message });
-      }
-    }
-
-    return res.status(200).json({
-      success: imported.length > 0,
-      data: { imported, failed: importFailed },
-    });
+    // Fire-and-forget: enqueue and return immediately with a jobId instead
+    // of blocking this request on runHeavyTask until the scrape (plus DB
+    // upsert, now also inside the handler above) finishes. The client polls
+    // GET /api/heavy-tasks/:jobId/status, which reports queue position and
+    // an ETA so the UI can show "you're #2, ~40s" instead of holding one
+    // HTTP connection open for up to the queue's 10-minute default timeout.
+    // The SESSION_EXPIRED case that used to be caught here now only ever
+    // happens inside the background handler — the status endpoint surfaces
+    // it as a failed job (see heavyTaskQueue.js's getQueuePosition), and the
+    // frontend checks the 'SESSION_EXPIRED:' prefix there instead. See
+    // PROGRESS.md M89.
+    const job = await enqueueHeavyTask('colaberry-scrape', { userId, projectLinks });
+    return res.status(202).json({ success: true, data: { jobId: job.id } });
   } catch (err) {
     console.error('[colaberry-import] error:', err.message);
-    // 'SESSION_EXPIRED:' prefix, not err.code — see colaberryProjectScraper.js's
-    // isSessionValid comment for why (the error crosses the heavy-task
-    // queue's BullMQ boundary, which only preserves err.message).
-    if (err.message.startsWith('SESSION_EXPIRED:')) {
-      return res.status(401).json({
-        success: false,
-        error: { code: 'SESSION_EXPIRED', message: err.message.replace(/^SESSION_EXPIRED:\s*/, '') },
-      });
-    }
     return res.status(500).json({ success: false, error: { code: 'SERVER_ERROR', message: err.message } });
   }
 });

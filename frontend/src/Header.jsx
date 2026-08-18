@@ -384,6 +384,25 @@ function Header({ onLogout }) {
   // cookies have actually gone stale) — previously this modal showed
   // unconditionally on every attempt, which read as "getting logged out"
   // every few minutes even though the stored session was often still fine.
+  // Polls GET /api/heavy-tasks/:jobId/status until the job leaves the
+  // waiting/active state. onUpdate fires on every tick (including the final
+  // one) so the caller can drive a "you're #N in line" banner; the return
+  // value is the terminal { state: 'completed'|'failed', ... } payload, or
+  // null if the connection was lost (e.g. token expired mid-wait — authFetch
+  // returns null on 401 without a logout callback here, same as this
+  // function's pre-existing behavior for the initial POST).
+  async function pollHeavyTaskStatus(jobId, { intervalMs = 3000, onUpdate } = {}) {
+    for (;;) {
+      const res = await authFetch(`${BASE_URL}/api/heavy-tasks/${jobId}/status`)
+      if (!res) return null
+      const body = await res.json()
+      if (!body.success) return null
+      onUpdate?.(body.data)
+      if (body.data.state === 'completed' || body.data.state === 'failed') return body.data
+      await new Promise(r => setTimeout(r, intervalMs))
+    }
+  }
+
   async function runColaberryImport(links) {
     setShowColaberryLogin(false)
     setColaberryBanner('Importing your Colaberry projects…')
@@ -401,19 +420,51 @@ function Header({ onLogout }) {
         setShowColaberryLogin(true)
         return
       }
-      if (!body?.success && body?.data?.imported?.length === 0 && body?.data?.failed?.length === 0) {
-        setColaberryBanner('Connected — no Colaberry projects found for your account.')
-      } else if (!body?.success) {
+      if (!body?.success) {
         setColaberryBanner(`Import failed: ${body?.error?.message || 'Unknown error.'}`)
-      } else {
-        const { imported, failed } = body.data
-        setColaberryBanner(
-          `Imported ${imported.length} Colaberry project${imported.length === 1 ? '' : 's'}` +
-          (failed?.length ? ` (${failed.length} failed)` : '') + '.'
-        )
-        setAnalyzingFullNames(prev => new Set([...prev, ...imported.map(p => p.title)]))
-        fetchImportedReposAndMaybeAutoImport()
+        return
       }
+      if (!body.data.jobId) {
+        // Auto-discovery found nothing — no background job was enqueued.
+        setColaberryBanner('Connected — no Colaberry projects found for your account.')
+        return
+      }
+
+      const info = await pollHeavyTaskStatus(body.data.jobId, {
+        onUpdate: (i) => {
+          if (i.state !== 'waiting' && i.state !== 'active') return
+          const etaText = i.etaMs ? ` — about ${Math.max(1, Math.round(i.etaMs / 1000))}s` : ''
+          setColaberryBanner(
+            i.position > 1
+              ? `You're #${i.position} in line…${etaText}`
+              : `Importing your Colaberry projects…${etaText}`
+          )
+        },
+      })
+
+      if (!info) {
+        setColaberryBanner('Import failed: lost connection while waiting.')
+        return
+      }
+      if (info.state === 'failed') {
+        const message = info.error || 'Unknown error.'
+        if (message.startsWith('SESSION_EXPIRED:')) {
+          setColaberryLinksToImport(links)
+          setColaberryBanner(null)
+          setShowColaberryLogin(true)
+          return
+        }
+        setColaberryBanner(`Import failed: ${message}`)
+        return
+      }
+
+      const { imported, failed } = info.result
+      setColaberryBanner(
+        `Imported ${imported.length} Colaberry project${imported.length === 1 ? '' : 's'}` +
+        (failed?.length ? ` (${failed.length} failed)` : '') + '.'
+      )
+      setAnalyzingFullNames(prev => new Set([...prev, ...imported.map(p => p.title)]))
+      fetchImportedReposAndMaybeAutoImport()
     } catch (err) {
       setColaberryBanner(`Import failed: ${err.message}`)
     }

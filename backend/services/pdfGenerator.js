@@ -2,6 +2,7 @@
 
 const puppeteer = require('puppeteer');
 const { TECH_CATEGORIES, TECH_LABELS } = require('./techMaps');
+const { guardBrowser, ResourceLimitExceededError } = require('./browserResourceGuard');
 
 async function generatePortfolioPdf(data) {
   const html = buildResumeHtml(data);
@@ -9,6 +10,9 @@ async function generatePortfolioPdf(data) {
     headless: true,
     args: ['--no-sandbox', '--disable-setuid-sandbox'],
   });
+  // Same in-process, no-Docker-ceiling situation as colaberryProjectScraper.js
+  // — see browserResourceGuard.js's header comment.
+  const guard = guardBrowser(browser, { label: 'portfolio-pdf' });
   try {
     const page = await browser.newPage();
     await page.setContent(html, { waitUntil: 'domcontentloaded' });
@@ -18,8 +22,14 @@ async function generatePortfolioPdf(data) {
       margin: { top: '12mm', right: '14mm', bottom: '12mm', left: '14mm' },
     });
     return pdfBuffer;
+  } catch (err) {
+    if (guard.wasKilledForMemory()) {
+      throw new ResourceLimitExceededError('This portfolio was too large to export as a PDF — try trimming project media.');
+    }
+    throw err;
   } finally {
-    await browser.close();
+    guard.stop();
+    await browser.close().catch(() => {});
   }
 }
 

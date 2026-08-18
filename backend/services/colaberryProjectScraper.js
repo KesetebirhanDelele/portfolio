@@ -12,6 +12,7 @@
 // Runs fully headless — no human interaction, no Xvfb/VNC container needed.
 // Consumes a storageState captured by the live-login flow (colaberryLiveLoginSessionManager).
 const { chromium } = require('playwright');
+const { guardBrowser, ResourceLimitExceededError } = require('./browserResourceGuard');
 
 const NAV_TIMEOUT_MS = 60000;
 const STEP_CLICK_TIMEOUT_MS = 15000;
@@ -152,6 +153,10 @@ async function scrapeColaberryProjects(storageState, projectUrls) {
   // already makes for Puppeteer. The container itself is the isolation
   // boundary, and this only ever navigates to Colaberry's own domain.
   const browser = await chromium.launch({ headless: true, args: ['--no-sandbox'] });
+  // Unlike the live-login sibling containers, this browser runs in-process
+  // with no Docker memory ceiling — guardBrowser is the application-level
+  // substitute. See browserResourceGuard.js's header comment.
+  const guard = guardBrowser(browser, { label: 'colaberry-scrape' });
   const succeeded = [];
   const failed = [];
   try {
@@ -178,10 +183,18 @@ async function scrapeColaberryProjects(storageState, projectUrls) {
       } catch (err) {
         console.error(`[colaberry-scraper] project failed (${url}):`, err.message);
         failed.push({ url, error: err.message });
+        // The guard already force-closed the browser — every remaining URL
+        // would fail the same way against a dead page, so stop the batch
+        // now instead of collecting N more confusing generic errors.
+        if (guard.wasKilledForMemory()) break;
       }
     }
   } finally {
-    await browser.close();
+    guard.stop();
+    await browser.close().catch(() => {});
+  }
+  if (guard.wasKilledForMemory()) {
+    throw new ResourceLimitExceededError('This import used more memory than allowed and was stopped — try fewer projects at once.');
   }
   return { succeeded, failed };
 }

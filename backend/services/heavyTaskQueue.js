@@ -21,7 +21,13 @@ const { captureException } = require('./errorTracking');
 
 const connection = { url: process.env.REDIS_URL || 'redis://localhost:6379' };
 const QUEUE_NAME = 'heavy-tasks';
-const CONCURRENCY = Number(process.env.HEAVY_TASK_CONCURRENCY) || 2;
+// Was 2 — raised now that both Chromium-launching handlers in this queue
+// (colaberry-scrape, portfolio-pdf) are capped at ~512MB RSS each via
+// browserResourceGuard.js. Worst case (4 jobs all pinned at the cap) is
+// ~2048MB against this host's measured ~2.9GB available RAM — real margin,
+// not a razor's edge. Deep-analysis jobs share this same pool too but don't
+// launch a browser, so this is a conservative (Chromium-only) worst case.
+const CONCURRENCY = Number(process.env.HEAVY_TASK_CONCURRENCY) || 4;
 
 const queue = new Queue(QUEUE_NAME, { connection });
 const queueEvents = new QueueEvents(QUEUE_NAME, { connection });
@@ -88,4 +94,48 @@ async function enqueueHeavyTask(name, data) {
   return queue.add(name, data, RETENTION);
 }
 
-module.exports = { registerHeavyTaskHandler, runHeavyTask, enqueueHeavyTask, queue, worker };
+// How many recently-completed jobs to sample for the average-duration
+// estimate used by getQueuePosition's ETA. All job types share one
+// queue/concurrency pool, so a mixed-type average is the honest number —
+// a scrape job and a PDF job draw from the same execution slots.
+const COMPLETED_SAMPLE_SIZE = 20;
+
+async function getAverageDurationMs() {
+  const recent = await queue.getJobs(['completed'], 0, COMPLETED_SAMPLE_SIZE - 1);
+  const durations = recent
+    .map(j => (j.finishedOn && j.processedOn) ? j.finishedOn - j.processedOn : null)
+    .filter(d => d !== null && d > 0);
+  if (durations.length === 0) return null;
+  return Math.round(durations.reduce((a, b) => a + b, 0) / durations.length);
+}
+
+// Powers the "you're #N in line, ~Xs" indicator for fire-and-forget jobs
+// (see enqueueHeavyTask callers in colaberryImport.js). Returns null if the
+// job id is unknown (e.g. already swept by RETENTION's removeOnComplete/
+// removeOnFail age, or never existed) — callers should treat that as
+// NOT_FOUND, not as "still waiting."
+async function getQueuePosition(jobId) {
+  const job = await queue.getJob(jobId);
+  if (!job) return null;
+  const state = await job.getState();
+  const userId = job.data?.userId ?? null;
+
+  if (state === 'completed') return { state, userId, result: job.returnvalue };
+  if (state === 'failed')    return { state, userId, error: job.failedReason };
+
+  const [waitingJobs, activeJobs, avgDurationMs] = await Promise.all([
+    queue.getJobs(['waiting'], 0, 999),
+    queue.getJobs(['active'], 0, 999),
+    getAverageDurationMs(),
+  ]);
+  const waitingIndex = waitingJobs.findIndex(j => j.id === jobId);
+  const jobsAhead = state === 'active'
+    ? 0
+    : (waitingIndex === -1 ? waitingJobs.length : waitingIndex) + activeJobs.length;
+  const position = jobsAhead + 1;
+  const etaMs = avgDurationMs != null ? Math.ceil(position / CONCURRENCY) * avgDurationMs : null;
+
+  return { state, userId, position, jobsAhead, etaMs };
+}
+
+module.exports = { registerHeavyTaskHandler, runHeavyTask, enqueueHeavyTask, getQueuePosition, queue, worker };
