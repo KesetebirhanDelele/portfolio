@@ -21,13 +21,27 @@ const { captureException } = require('./errorTracking');
 
 const connection = { url: process.env.REDIS_URL || 'redis://localhost:6379' };
 const QUEUE_NAME = 'heavy-tasks';
-// Was 2 — raised now that both Chromium-launching handlers in this queue
-// (colaberry-scrape, portfolio-pdf) are capped at ~512MB RSS each via
-// browserResourceGuard.js. Worst case (4 jobs all pinned at the cap) is
-// ~2048MB against this host's measured ~2.9GB available RAM — real margin,
-// not a razor's edge. Deep-analysis jobs share this same pool too but don't
-// launch a browser, so this is a conservative (Chromium-only) worst case.
-const CONCURRENCY = Number(process.env.HEAVY_TASK_CONCURRENCY) || 4;
+// Was 4 on the original 2 vCPU / 3.7GB host — raised to 8 after the host was
+// resized to 4 vCPU / 7.6GB (measured: ~6.8GB available at idle) on
+// 2026-08-18, briefly to 10 same-day, then pulled back to 6 the same day
+// once live-login's own per-session memory was separately doubled to 2048m
+// (colaberryLiveLoginSessionManager.js) for the same demo. NOTE: this does
+// NOT speed up a single import — jobs in this queue (colaberry-scrape,
+// portfolio-pdf) each process their own work sequentially internally; this
+// number only controls how many SEPARATE jobs run in parallel. Sized against
+// REALISTIC demo-day load, not the full theoretical worst case: base
+// services (~1GB) + one active live-login session (2048MB, the actual
+// expected concurrent load today) + 6 jobs at the ~512MB RSS cap
+// (browserResourceGuard.js) = ~6GB, real margin under the ~6.8GB available.
+// Flagging honestly: MAX_CONCURRENT_SESSIONS (4) × 2048MB alone is 8192MB,
+// which exceeds total host RAM (7.6GB) on its own — no value of this
+// constant can make the FULL theoretical worst case (all 4 live-login
+// sessions AND this queue maxed out simultaneously) fit. That's an
+// intentionally separate, already-flagged, demo-day-only risk (only 1
+// session will actually run today) — not something this number can solve;
+// revisit the live-login side (session count or per-session memory) if a
+// true worst-case guarantee is ever needed.
+const CONCURRENCY = Number(process.env.HEAVY_TASK_CONCURRENCY) || 6;
 
 const queue = new Queue(QUEUE_NAME, { connection });
 const queueEvents = new QueueEvents(QUEUE_NAME, { connection });
