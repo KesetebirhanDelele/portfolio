@@ -10,19 +10,34 @@ const router = express.Router();
 
 // GET /api/github-app/install?token=JWT
 // Browser redirect — token passed as query param since headers aren't available
-router.get('/install', (req, res) => {
+router.get('/install', async (req, res) => {
   const appSlug = process.env.GITHUB_APP_SLUG;
   if (!appSlug) return res.status(500).send('GITHUB_APP_SLUG not configured');
 
   const { token } = req.query;
   if (!token) return res.status(401).send('Not authenticated');
 
-  let userId;
+  let userId, sessionId;
   try {
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
     userId = decoded.id;
+    sessionId = decoded.sessionId;
   } catch {
     return res.status(401).send('Invalid or expired session');
+  }
+
+  // This route can't use authMiddleware directly (token arrives as a query
+  // param for a browser redirect, not an Authorization header on an API
+  // fetch), but a logged-out/revoked session must still be rejected here
+  // the same as everywhere else — otherwise logging out wouldn't actually
+  // invalidate a token for this one endpoint. Mirrors authMiddleware.js's
+  // own check exactly.
+  const sessionResult = await pool.query(
+    `SELECT id FROM sessions WHERE id = $1 AND user_id = $2 AND revoked_at IS NULL AND expires_at > NOW()`,
+    [sessionId, userId]
+  );
+  if (!sessionResult.rows[0]) {
+    return res.status(401).send('Session invalid or expired');
   }
 
   const state = jwt.sign({ userId }, process.env.JWT_SECRET, { expiresIn: '15m' });
