@@ -437,6 +437,7 @@ router.get('/public/:slug/pdf', heavyOperationLimiter, async (req, res) => {
       education:      linkedin.education   || [],
       certifications: linkedin.certifications || [],
       resumeSummary:  linkedin.summary || null,
+      resumeHeadline: linkedin.headline || null,
     }, { timeoutMs: 60 * 1000 });
     const pdfBuffer = Buffer.from(pdfBase64, 'base64');
 
@@ -882,7 +883,9 @@ router.post('/:id/publish-github-repo', authMiddleware, generationLimiter, async
       });
     }
 
-    const resumeSummary = (await getResumeData(userId))?.summary || null;
+    const resumeDataForPublish = await getResumeData(userId);
+    const resumeSummary  = resumeDataForPublish?.summary  || null;
+    const resumeHeadline = resumeDataForPublish?.headline || null;
 
     // Resolve each project's uploaded media (repo_media, keyed by repo id) to
     // a repoName -> imageUrl map so the README can show real project images,
@@ -967,7 +970,7 @@ router.post('/:id/publish-github-repo', authMiddleware, generationLimiter, async
     }
 
     const { repoUrl, created, projectsSynced, projectsRemoved } = await publishPortfolioAsGithubRepo({
-      token, owner, repoName, narrative, profile, resumeSummary, projectImages, caseStudies,
+      token, owner, repoName, narrative, profile, resumeSummary, resumeHeadline, projectImages, caseStudies,
     });
 
     // Previously only returned once in this response and never persisted —

@@ -136,7 +136,10 @@ const PREV_CATS = {
 
 function MiniPreview({ headline, narrative, topSkills, projects, repos, analysisMap, profile, linkedin }) {
   const displayName = profile?.fullName || 'Your Portfolio'
-  const displayHeadline = profile?.headline || headline
+  // Resume's own headline wins over the AI-generated one when present — same
+  // resume-priority rule as the About Me block below and every published
+  // channel (public page, GitHub README, PDF export). See PROGRESS.md M99.
+  const displayHeadline = profile?.headline || linkedin?.headline?.trim() || headline
   const initials = displayName.split(' ').slice(0, 2).map(w => w[0]).join('').toUpperCase()
 
   const aiRepoCount = repos.filter(r =>

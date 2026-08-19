@@ -95,10 +95,12 @@ function getYearsExperience(linkedin, profile) {
 }
 
 // ─── Sidebar ──────────────────────────────────────────────────────────────────
-function Sidebar({ title, headline, topSkills, githubUsername, profile, careerSignals, repos, repoCount, className = '' }) {
+function Sidebar({ title, headline, topSkills, githubUsername, profile, careerSignals, repos, repoCount, linkedin = null, className = '' }) {
   const grouped     = groupByCategory(topSkills)
   const displayName = profile?.fullName || title || 'Developer'
-  const displayHead = profile?.headline || headline
+  // Resume's own headline wins over the AI-synthesized one when present —
+  // same resume-priority rule as the Professional Summary below (M99).
+  const displayHead = profile?.headline || linkedin?.headline?.trim() || headline
   const initials    = displayName.split(' ').slice(0, 2).map(w => w[0]).join('').toUpperCase()
 
   return (
@@ -954,6 +956,7 @@ export default function PublicPortfolio({ slug }) {
           githubUsername={githubUsername}
           profile={profile}
           careerSignals={careerSignals}
+          linkedin={linkedin}
           repos={repos}
           repoCount={repos.length}
         />
@@ -964,7 +967,7 @@ export default function PublicPortfolio({ slug }) {
           {/* Mobile profile header — hidden on desktop via CSS */}
           {(() => {
             const displayName = profile?.fullName || title || 'Developer'
-            const displayHead = profile?.headline || headline
+            const displayHead = profile?.headline || linkedin?.headline?.trim() || headline
             const initials    = displayName.split(' ').slice(0, 2).map(w => w[0]).join('').toUpperCase()
             return (
               <div className="pp-mobile-header" style={{

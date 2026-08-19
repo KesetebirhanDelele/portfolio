@@ -541,7 +541,7 @@ function buildResumeHtml({
   title, headline, narrative, topSkills = [], projects = [],
   careerSignals = [], repos = [], githubUsername,
   profile = {}, experience = [], education = [], certifications = [],
-  resumeSummary = null,
+  resumeSummary = null, resumeHeadline = null,
 }) {
   const patterns      = allPatterns(repos);
   const skillsByCategory = aggregateSkills(repos, topSkills, patterns);
@@ -558,7 +558,12 @@ function buildResumeHtml({
   const summaryParagraphs = [resumeSummary?.trim() || repoSummary].filter(Boolean);
 
   const displayName     = profile.fullName || title || 'Developer Portfolio';
-  const displayRoleLine = buildProfessionalHeadline(repos, careerSignals, experience, profile.headline || headline);
+  // Resume's own headline wins outright when present — same resume-priority
+  // rule as the summary above (M99). buildProfessionalHeadline's level+domain
+  // inference from repos/careerSignals is a smart guess for when no resume
+  // exists, not something that should override the person's own stated title.
+  const displayRoleLine = resumeHeadline?.trim()
+    || buildProfessionalHeadline(repos, careerSignals, experience, profile.headline || headline);
 
   const contactParts = [
     profile.email       ? esc(profile.email) : null,

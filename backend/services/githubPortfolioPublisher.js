@@ -187,7 +187,7 @@ ${summary}
 `;
 }
 
-function buildPortfolioReadme(narrative, profile, assigned, resumeSummary, projectImages = {}) {
+function buildPortfolioReadme(narrative, profile, assigned, resumeSummary, resumeHeadline, projectImages = {}) {
   const badges = buildSkillBadges(narrative.top_skills);
   // Resume-sourced summary (the person's own words) replaces the AI-synthesized
   // narrative when a resume is on file — not stacked alongside it — so the
@@ -197,13 +197,17 @@ function buildPortfolioReadme(narrative, profile, assigned, resumeSummary, proje
   // diverge). Falls back to the AI narrative only when no resume exists. See
   // PROGRESS.md M92.
   const about = resumeSummary?.trim() || narrative.narrative || '';
+  // Same resume-priority rule applied to the headline (M99) — the AI-generated
+  // narrative.headline is a synthesized "LinkedIn-style title" guess, not the
+  // person's own words, so it only shows when no resume headline exists.
+  const displayHeadline = resumeHeadline?.trim() || narrative.headline || '';
   const projectCards = assigned
     .map(({ project, folder }) => buildProjectCard(project, folder, projectImages[project.repoName]))
     .join('\n');
   const contactBadges = buildContactBadges(profile);
 
   return `# ${profile?.fullName || 'Portfolio'}
-${narrative.headline ? `\n**${narrative.headline}**\n` : ''}
+${displayHeadline ? `\n**${displayHeadline}**\n` : ''}
 ## Skills & Tools
 
 ${badges || '_None yet_'}
@@ -308,12 +312,14 @@ ${bullets(caseStudy.businessImpact)}
 // profile:   portfolio.content_json.profile
 // resumeSummary: the user's own uploaded resume summary, shown before the
 //   AI-synthesized narrative when present (M63/M64.2)
+// resumeHeadline: the user's own resume/LinkedIn headline, shown instead of
+//   the AI-generated narrative.headline when present (M99)
 // projectImages: { [repoName]: imageUrl } — from repo_media, same source the
 //   public portfolio page uses (M64.2)
 // caseStudies: { [repoName]: caseStudy } — AI-generated Business Problem /
 //   Objective / Workflow / Key Insights / Business Impact per project (M65).
 //   Missing entries just render the original minimal project page.
-async function publishPortfolioAsGithubRepo({ token, owner, repoName, narrative, profile, resumeSummary = null, projectImages = {}, caseStudies = {} }) {
+async function publishPortfolioAsGithubRepo({ token, owner, repoName, narrative, profile, resumeSummary = null, resumeHeadline = null, projectImages = {}, caseStudies = {} }) {
   const { repo, created } = await ensureRepoExists(token, owner, repoName);
   await setGeneratedTopic(token, owner, repoName, repo.topics || []);
 
@@ -333,7 +339,7 @@ async function publishPortfolioAsGithubRepo({ token, owner, repoName, narrative,
 
   await upsertFile(
     token, owner, repoName, 'README.md',
-    buildPortfolioReadme(narrative, profile, assigned, resumeSummary, projectImages),
+    buildPortfolioReadme(narrative, profile, assigned, resumeSummary, resumeHeadline, projectImages),
     `Sync portfolio README (${projects.length} project${projects.length === 1 ? '' : 's'})`
   );
 
