@@ -377,7 +377,7 @@ router.get('/public/:slug/pdf', heavyOperationLimiter, async (req, res) => {
     const repositoryIds = portfolio.content_json?.repository_ids || [];
 
     const reposResult = await pool.query(
-      `SELECT r.id AS repo_id, r.name, r.full_name, r.primary_language,
+      `SELECT r.id AS repo_id, r.name, r.full_name, r.primary_language, r.provider,
               a.skills_json, a.summary_json,
               da.intelligence_json, da.inference_json, da.code_intelligence_json
        FROM repositories r
@@ -400,7 +400,13 @@ router.get('/public/:slug/pdf', heavyOperationLimiter, async (req, res) => {
     const narrative      = portfolio.content_json?.narrative || {};
     const profile        = portfolio.content_json?.profile   || {};
     const linkedin       = (await getResumeData(portfolio.user_id)) || {};
-    const githubUsername = reposResult.rows.find(r => r.full_name)?.full_name?.split('/')?.[0] || null;
+    // Only a real GitHub repo's full_name is a genuine "owner/repo" path — a
+    // Colaberry project's full_name duplicates its scraped title instead
+    // (no real owner), which previously leaked through as a garbage
+    // "github.com/<project title>" link. Same fix already applied to the
+    // public portfolio page's own derivation (M92); this PDF route had its
+    // own separate copy of the same bug. See PROGRESS.md M100.
+    const githubUsername = reposResult.rows.find(r => r.provider === 'github' && r.full_name)?.full_name?.split('/')?.[0] || null;
 
     const repos = reposResult.rows.map(r => ({
       name:            r.name,
