@@ -281,6 +281,12 @@ router.get('/public/:slug', async (req, res) => {
         summary:         r.summary_json?.text,
         whatItDoes:      r.summary_json?.what_it_does,
         highlights:      r.summary_json?.highlights,
+        // Consumed by PublicPortfolio.jsx's ProjectCard alongside
+        // highlights.purpose/use_cases for the expanded "Highlights" bullet
+        // list — same three fields pdfGenerator.js's basic-pipeline bullet
+        // fallback uses, kept in sync so the PDF and live page match. See
+        // PROGRESS.md M103/M104.
+        keyTakeaways:    r.summary_json?.key_takeaways,
         confidenceLabel: r.summary_json?.confidence_label,
       } : null,
     }));
@@ -417,6 +423,13 @@ router.get('/public/:slug/pdf', heavyOperationLimiter, async (req, res) => {
         whatItDoes:   r.summary_json?.what_it_does,
         summary:      r.summary_json?.text,
         strengths:    r.summary_json?.highlights?.strengths,
+        // purpose/useCases/keyTakeaways: only consumed by pdfGenerator.js's
+        // basic-pipeline bullet fallback (see its comment) for repos with no
+        // deep-analysis intelligence at all — e.g. Colaberry projects, which
+        // never get a deep_analyses row since they aren't source code.
+        purpose:      r.summary_json?.highlights?.purpose,
+        useCases:     r.summary_json?.highlights?.use_cases,
+        keyTakeaways: r.summary_json?.key_takeaways,
       } : null,
       intelligence:     r.intelligence_json    || null,
       inference:        r.inference_json       || null,

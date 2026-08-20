@@ -186,8 +186,15 @@ function Header({ onLogout }) {
       await Promise.all([...analyzingFullNames].map(async fullName => {
         const repo = importedRepos.find(r => r.full_name === fullName)
         if (!repo) { done.add(fullName); return }
+        // Colaberry imports never get a deep_analyses row — they run through
+        // the simpler analyses table instead (see colaberryImport.js's top
+        // comment). Polling /api/deep-analysis/:id/latest for one 404s
+        // forever, so this banner never cleared for a Colaberry-only import.
+        const statusUrl = repo.provider === 'colaberry'
+          ? `${BASE_URL}/api/analysis/repo/${repo.id}`
+          : `${BASE_URL}/api/deep-analysis/${repo.id}/latest`
         try {
-          const res = await fetch(`${BASE_URL}/api/deep-analysis/${repo.id}/latest`, {
+          const res = await fetch(statusUrl, {
             headers: { Authorization: `Bearer ${token}` },
           })
           const json = await res.json()

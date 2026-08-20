@@ -464,6 +464,27 @@ function buildProjectBlocks(projects, repos) {
       }
     }
 
+    // Priority 4 (basic-pipeline fallback): humanBullets and archBullets both
+    // come exclusively from deep-analysis intelligence/codeIntelligence,
+    // which Colaberry projects never get (they aren't source code — see
+    // PROGRESS.md M47.3/M51) and a GitHub repo won't have yet if its
+    // deep-analysis is still pending or failed. Rather than ship zero
+    // bullets whenever that's the case, fall back to the basic analysis's
+    // own purpose/use-case sentences and its positive key takeaways —
+    // "positive" only, since a "warning" takeaway (e.g. "No code files
+    // detected for implementation") reads as a caveat, not an accomplishment,
+    // and doesn't belong in a portfolio bullet.
+    if (finalBullets.length === 0) {
+      const basicBullets = [
+        repo.analysis?.purpose,
+        repo.analysis?.useCases,
+        ...(repo.analysis?.keyTakeaways || [])
+          .filter(k => k.status === 'positive')
+          .map(k => k.text),
+      ].filter(Boolean).filter(b => !isGenericBullet(b));
+      finalBullets.push(...basicBullets.slice(0, 3));
+    }
+
     // Tech stack: frameworks first (more specific/informative than generic
     // technology tags — "FastAPI" says more than "rest-routes"), then
     // remaining technologies, deduplicated. Capped at 8, not 6 — 6 was

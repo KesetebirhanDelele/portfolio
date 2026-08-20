@@ -406,8 +406,23 @@ function ProjectCard({ repo, oneLiner, aiDescription, githubProjectUrl }) {
   const firstAiParagraph = aiParagraphs[0] || null
   const aiHasExtraContent = aiDescription && !(aiRepeatsOverview && aiParagraphs.length === 1)
 
+  // Same three fields, same "positive only" filter as pdfGenerator.js's
+  // basic-pipeline bullet fallback — kept in sync so the PDF and live page
+  // show the same supporting detail. Skip the purpose bullet if it just
+  // restates shortDesc (same dedup reasoning as aiRepeatsOverview above).
+  const purposeBullet = repo.analysis?.highlights?.purpose?.trim() || null
+  const useCasesBullet = repo.analysis?.highlights?.use_cases?.trim() || null
+  const keyTakeawayBullets = (repo.analysis?.keyTakeaways || [])
+    .filter(k => k.status === 'positive')
+    .map(k => k.text)
+  const overviewBullets = [
+    (purposeBullet && shortDesc && purposeBullet === shortDesc.trim()) ? null : purposeBullet,
+    useCasesBullet,
+    ...keyTakeawayBullets,
+  ].filter(Boolean)
+
   const collapseText = shortDesc
-  const hasReadMore = aiHasExtraContent || shortDesc.length > 120
+  const hasReadMore = aiHasExtraContent || overviewBullets.length > 0 || shortDesc.length > 120
   const stars = repo.stars || 0
   const forks = repo.forks || 0
 
@@ -546,6 +561,28 @@ function ProjectCard({ repo, oneLiner, aiDescription, githubProjectUrl }) {
                   {para}
                 </p>
               ))}
+            </div>
+          </div>
+        )}
+
+        {expanded && overviewBullets.length > 0 && (
+          <div style={{ marginBottom: '10px' }}>
+            <div style={{
+              padding: '12px 14px',
+              backgroundColor: '#f8faff',
+              border: `1px solid #e0e7ff`,
+              borderRadius: '8px',
+            }}>
+              <span style={{ fontSize: '10px', fontWeight: '700', color: '#4361ee', textTransform: 'uppercase', letterSpacing: '0.8px', display: 'block', marginBottom: '8px' }}>
+                Highlights
+              </span>
+              <ul style={{ margin: 0, paddingLeft: '16px' }}>
+                {overviewBullets.map((b, i) => (
+                  <li key={i} style={{ fontSize: '12px', color: TS, lineHeight: 1.7, marginBottom: i < overviewBullets.length - 1 ? '4px' : 0 }}>
+                    {b}
+                  </li>
+                ))}
+              </ul>
             </div>
           </div>
         )}
