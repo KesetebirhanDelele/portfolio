@@ -159,8 +159,89 @@ async function getNetworkProjects() {
   });
 }
 
+// Full detail for one deployed project, by projectID — the SQL-only
+// replacement for what colaberryProjectScraper.js used to pull from the
+// live page (title, description, image, deployment link). Same source
+// table as getNetworkProjects above, scoped to a single project instead of
+// the whole catalog. Returns null if the project isn't in the deployed
+// catalog at all — the SQL-only import path (see PROGRESS.md M101) treats
+// that as a real "not found," not a fallback trigger.
+//
+// A handful of projectIDs have more than one row in ADF_Proj_Deployed
+// (261 total rows vs 253 distinct IDs, confirmed during the M101
+// investigation) — ORDER BY Updated DESC takes the most recently edited one.
+async function getProjectDetailsById(projectId) {
+  const pool = await getPool();
+  const [projectResult, tagsResult] = await Promise.all([
+    pool.request()
+      .input('projectId', sql.Int, projectId)
+      .query(`
+        SELECT TOP 1 projectID, ProjectName, ProjectSummary, ProjectVisual, HtmlCode
+        FROM dbo.ADF_Proj_Deployed
+        WHERE projectID = @projectId
+          AND HtmlCode IS NOT NULL AND LEN(HtmlCode) > 0
+        ORDER BY Updated DESC
+      `),
+    pool.request()
+      .input('projectId', sql.Int, projectId)
+      .query(`
+        SELECT DISTINCT TagName
+        FROM dbo.vw_ADF_CCS_ProjectTags_New_Catgorize
+        WHERE ProjectID = @projectId
+          AND TagStatus = 1
+          AND TagCategory IS NOT NULL AND TagCategory <> 'DO NOT USE'
+          AND TagName IS NOT NULL AND LTRIM(RTRIM(TagName)) <> ''
+      `),
+  ]);
+  const row = projectResult.recordset[0];
+  if (!row) return null;
+  return {
+    networkId:           Number(row.projectID),
+    title:               row.ProjectName,
+    description:         row.ProjectSummary || '',
+    imageUrl:            row.ProjectVisual || '',
+    deploymentEmbedHtml: row.HtmlCode,
+    tags:                tagsResult.recordset.map(t => t.TagName.trim()),
+  };
+}
+
+// Step-by-step content for one project, sourced from the CMS table
+// Colaberry's own project authors use to build the "Step By Step" page —
+// dbo.ADF_CCS_ProjectQuestions. PQ_TypeID meanings (from the
+// dbo.ADF_CCS_QuestionType lookup table, confirmed during the M101
+// investigation): 1 = Step Name, 3 = Detailed Instructions, 5 = Insight.
+// (2/4/6/7 — order/screenshot/code file/data file — carry no reusable text
+// for this catalog and are skipped.) Values are stored as author-pasted
+// HTML fragments, not rendered page text, so they still need converting to
+// plain text — see colaberryStepContentBuilder.js.
+async function getProjectStepsById(projectId) {
+  const pool = await getPool();
+  const result = await pool.request()
+    .input('projectId', sql.Int, projectId)
+    .query(`
+      SELECT PQ_Order, PQ_TypeID, PQ_Value
+      FROM dbo.ADF_CCS_ProjectQuestions
+      WHERE PQ_ProjectID = @projectId AND PQ_TypeID IN (1, 3, 5)
+      ORDER BY PQ_Order, PQ_TypeID
+    `);
+
+  const stepsByOrder = new Map();
+  for (const row of result.recordset) {
+    const order = Number(row.PQ_Order);
+    if (!stepsByOrder.has(order)) {
+      stepsByOrder.set(order, { stepNumber: order, title: '', instructionsHtml: '', insightHtml: '' });
+    }
+    const step = stepsByOrder.get(order);
+    if (row.PQ_TypeID === 1) step.title = (row.PQ_Value || '').trim();
+    else if (row.PQ_TypeID === 3) step.instructionsHtml = row.PQ_Value || '';
+    else if (row.PQ_TypeID === 5) step.insightHtml = row.PQ_Value || '';
+  }
+  return [...stepsByOrder.values()].sort((a, b) => a.stepNumber - b.stepNumber);
+}
+
 module.exports = {
   getColaberryUserByEmail, getProjectLinksForUser,
   getNetworkProjects,
+  getProjectDetailsById, getProjectStepsById,
   getPool, // exposed for healthChecks.js's read-only connectivity probe
 };

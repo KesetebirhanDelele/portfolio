@@ -26,7 +26,7 @@ const QUEUE_NAME = 'heavy-tasks';
 // 2026-08-18, briefly to 10 same-day, then pulled back to 6 the same day
 // once live-login's own per-session memory was separately doubled to 2048m
 // (colaberryLiveLoginSessionManager.js) for the same demo. NOTE: this does
-// NOT speed up a single import — jobs in this queue (colaberry-scrape,
+// NOT speed up a single import — jobs in this queue (colaberry-sql-import,
 // portfolio-pdf) each process their own work sequentially internally; this
 // number only controls how many SEPARATE jobs run in parallel. Sized against
 // REALISTIC demo-day load, not the full theoretical worst case: base
