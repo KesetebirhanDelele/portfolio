@@ -8,6 +8,7 @@ const { queueDeepAnalysis }    = require('../services/deepAnalysisQueue');
 const { getInstallationRepos } = require('../services/githubApp');
 const { GENERATED_PORTFOLIO_TOPIC } = require('../services/githubPortfolioPublisher');
 const { getGithubInfo, getGithubAccounts, getAppInstallations, getTokenForOwner } = require('../services/githubTokenResolver');
+const { extractReadmeImage } = require('../services/readmeImageExtractor');
 
 const router = express.Router();
 
@@ -388,16 +389,25 @@ router.post('/import', authMiddleware, async (req, res) => {
       // PROGRESS.md M60 for the bug this size gate silently caused.
       const readmeContent = await fetchReadme(owner, repoName, ghInfo.github_access_token);
 
+      // Auto-captured fallback image, same role for GitHub repos that
+      // ADF_Proj_Deployed.ProjectVisual already plays for Colaberry ones —
+      // every consumer already prefers manually-pasted media over this, so
+      // it only ever fills a gap, never overrides a user's choice. See
+      // PROGRESS.md M105.
+      const readmeImageUrl = extractReadmeImage(readmeContent, {
+        owner, repo: repoName, defaultBranch: repo.default_branch,
+      });
+
       // Upsert into repositories — update on re-import
       const repoResult = await pool.query(
         `INSERT INTO repositories (
            user_id, provider, external_repo_id, name, full_name, description,
            private, default_branch, primary_language, stars_count, forks_count,
-           topics, readme_content, repo_created_at, repo_updated_at,
+           topics, readme_content, image_url, repo_created_at, repo_updated_at,
            imported_at, sync_status, created_at, updated_at
          ) VALUES (
            $1, 'github', $2, $3, $4, $5, $6, $7, $8, $9, $10,
-           $11, $12, $13, $14, NOW(), 'synced', NOW(), NOW()
+           $11, $12, $13, $14, $15, NOW(), 'synced', NOW(), NOW()
          )
          ON CONFLICT (provider, external_repo_id) DO UPDATE SET
            user_id          = EXCLUDED.user_id,
@@ -409,6 +419,7 @@ router.post('/import', authMiddleware, async (req, res) => {
            forks_count      = EXCLUDED.forks_count,
            topics           = EXCLUDED.topics,
            readme_content   = EXCLUDED.readme_content,
+           image_url        = EXCLUDED.image_url,
            repo_updated_at  = EXCLUDED.repo_updated_at,
            imported_at      = NOW(),
            sync_status      = 'synced',
@@ -427,6 +438,7 @@ router.post('/import', authMiddleware, async (req, res) => {
           repo.forks_count,
           JSON.stringify(repo.topics || []),
           readmeContent,
+          readmeImageUrl,
           repo.created_at,
           repo.updated_at,
         ]
@@ -592,6 +604,9 @@ router.post('/:repositoryId/refresh', authMiddleware, async (req, res) => {
     });
 
     const readmeContent = await fetchReadme(owner, repoName, accessToken);
+    const readmeImageUrl = extractReadmeImage(readmeContent, {
+      owner, repo: repoName, defaultBranch: ghRepo.default_branch,
+    });
 
     await pool.query(
       `UPDATE repositories SET
@@ -601,9 +616,10 @@ router.post('/:repositoryId/refresh', authMiddleware, async (req, res) => {
          forks_count       = $4,
          topics            = $5,
          readme_content    = $6,
-         repo_updated_at   = $7,
+         image_url         = $7,
+         repo_updated_at   = $8,
          updated_at        = NOW()
-       WHERE id = $8`,
+       WHERE id = $9`,
       [
         ghRepo.description || null,
         ghRepo.language || null,
@@ -611,6 +627,7 @@ router.post('/:repositoryId/refresh', authMiddleware, async (req, res) => {
         ghRepo.forks_count,
         JSON.stringify(ghRepo.topics || []),
         readmeContent,
+        readmeImageUrl,
         ghRepo.updated_at,
         repositoryId,
       ]
