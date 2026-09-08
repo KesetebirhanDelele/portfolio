@@ -7,9 +7,11 @@ services:
       POSTGRES_DB: ${POSTGRES_DB}
     volumes:
       - postgres_data:/var/lib/postgresql/data
-    # Loopback-only: the backend/frontend containers run with
-    # network_mode: host (see below) and reach this via localhost, not
-    # Docker DNS. Never bound to 0.0.0.0 — not reachable off this host.
+    # Loopback-only, for host-side admin convenience (docker compose exec /
+    # an external psql client on the box itself) — never bound to 0.0.0.0,
+    # not reachable off this host. Other containers reach this by service
+    # name (postgres:5432) over Compose's own default network, not through
+    # this published port at all.
     ports:
       - "127.0.0.1:5432:5432"
     healthcheck:
@@ -37,10 +39,8 @@ services:
       retries: 10
     restart: unless-stopped
 
-  # One-shot: runs migrations, exits. Stays on the default Compose network
-  # (unlike backend/frontend below) so it can reach postgres by service
-  # name — it never touches the live-login feature, so it has no reason to
-  # need host networking.
+  # One-shot: runs migrations, exits. Same default Compose network as every
+  # other service now — reaches postgres by service name.
   migrate:
     build:
       context: ./backend
@@ -52,28 +52,27 @@ services:
         condition: service_healthy
     restart: "no"
 
-  # network_mode: host — required, not optional. colaberryLiveLoginSessionManager.js
-  # spawns sibling containers (over the mounted socket) that publish their
-  # ports to the HOST's 127.0.0.1; without host networking, this container's
-  # own 127.0.0.1 is a different namespace and those connections fail
-  # outright. See deployment.md's "Colaberry live-login" section for the
-  # full explanation, including why postgres/redis are reached via
-  # localhost instead of Docker DNS as a direct consequence of this.
+  # Normal, isolated Compose networking (no network_mode: host, no Docker
+  # socket mount) — this used to be required for Colaberry live-login,
+  # which spawned sibling containers over a mounted host socket and needed
+  # the backend's own 127.0.0.1 to BE the host's loopback to reach them.
+  # As of PROGRESS.md M101/M102, Colaberry project import is SQL-only and
+  # never drives that feature at all; it's structurally unreachable through
+  # the UI (see PROGRESS.md M105-adjacent investigation, same session).
+  # Dropping the socket mount removes what was, by deployment.md's own
+  # description, "root-equivalent host access from inside the backend
+  # container if it's ever compromised" — a real hardening, not just a
+  # simplification. Reaches postgres/redis by service name now, not
+  # localhost, since it's no longer sharing the host's network namespace.
   backend:
     build:
       context: ./backend
-    network_mode: host
     env_file:
       - .env
     environment:
-      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@localhost:5432/${POSTGRES_DB}
-      REDIS_URL: redis://:${REDIS_PASSWORD}@localhost:${REDIS_HOST_PORT:-6379}
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
       PORT: "5000"
-    volumes:
-      # Sibling-container control for the live-login feature — see the
-      # comment above. This is root-equivalent host access; the socket
-      # mount is the whole reason this service needs network_mode: host.
-      - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       postgres:
         condition: service_healthy
@@ -81,10 +80,9 @@ services:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
-    # curl is already in this image (installed for the Docker CLI apt-get
-    # setup above). Hits the same GET /api/health that healthMonitor.js
-    # samples internally — -f treats the 503 an unhealthy required
-    # dependency (Postgres/Redis) returns as a failed check.
+    # Hits the same GET /api/health that healthMonitor.js samples internally
+    # — a container's own 127.0.0.1 always means itself, regardless of
+    # network mode, so this didn't need to change.
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://127.0.0.1:5000/api/health || exit 1"]
       interval: 30s
@@ -93,20 +91,22 @@ services:
       start_period: 20s
     restart: unless-stopped
 
-  # Also host-networked — the same reason as backend: it reverse-proxies
-  # /api/* to http://127.0.0.1:5000 (nginx.conf), which only resolves to
-  # the backend under host networking, not a Docker bridge network.
   # Publicly reachable on the host's ports 80/443 (Hetzner Firewall gates
-  # this, not Compose). TLS terminates here via a nip.io Let's Encrypt cert
-  # (deployment.md's TLS stopgap, 2026-08-16) — certs live on the host at
-  # /etc/letsencrypt (certbot manages renewal there) and are mounted
+  # this, not Compose) — now via an explicit port mapping instead of
+  # network_mode: host, since it no longer needs to share the host's
+  # loopback to reach the backend (that's `backend:5000` over Docker DNS
+  # now — see nginx.conf). TLS terminates here via a nip.io Let's Encrypt
+  # cert (deployment.md's TLS stopgap, 2026-08-16) — certs live on the host
+  # at /etc/letsencrypt (certbot manages renewal there) and are mounted
   # read-only so a container rebuild never needs to bake in cert material.
   frontend:
     build:
       context: ./frontend
       args:
         VITE_API_BASE_URL: ""
-    network_mode: host
+    ports:
+      - "80:80"
+      - "443:443"
     volumes:
       - /etc/letsencrypt:/etc/letsencrypt:ro
     depends_on:

@@ -1,4 +1,5 @@
 const crypto = require('crypto');
+const fs = require('fs');
 const { execFile } = require('child_process');
 const pool = require('../db/postgres');
 const { encrypt: sharedEncrypt, decrypt: sharedDecrypt } = require('./encryption');
@@ -249,7 +250,21 @@ function decryptStorageState(row, keyHex) {
 // restarted, any containers it was tracking in memory are now orphaned —
 // driver.js's own 10-minute safety-net will eventually self-terminate them,
 // but there's no reason to wait for that just to tidy up.
+// Servers built without the Docker-socket-mount architecture (see
+// deployment.md — this whole live-login feature is unused as of M101/M102's
+// SQL-only Colaberry import, and new deployments deliberately skip mounting
+// the socket at all) have no `docker` CLI able to reach a daemon here.
+// Checked up front so a normal, expected setup logs one clear info line at
+// boot instead of a "sweep failed" error every time.
+function hasDockerSocket() {
+  return fs.existsSync('/var/run/docker.sock');
+}
+
 async function cleanupOrphanedContainers() {
+  if (!hasDockerSocket()) {
+    console.log('[colaberry-live-login] no Docker socket mounted — skipping orphan cleanup (expected on servers built without the live-login architecture).');
+    return;
+  }
   try {
     const output = await run('docker', ['ps', '-a', '--filter', 'name=colaberry-live-', '--format', '{{.Names}}']);
     const names = output.split('\n').map(s => s.trim()).filter(Boolean);
