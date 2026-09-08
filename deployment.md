@@ -21,19 +21,20 @@ Only two things get a public URL — everything else stays internal:
 
 Single origin, path-based routing (`server/` → frontend, `server/api/*` → backend) instead of subdomains: one DNS record if/when a domain gets added, one TLS cert, and same-origin requests mean **zero CORS configuration needed**. Revisit only if frontend and backend ever need independent scaling or deploy cadence — neither applies at this app's scale.
 
-### The Colaberry live-login feature forces `network_mode: host` — this is the load-bearing decision in the whole compose file
+### Normal Compose networking — no host networking, no Docker socket mount (as of the 2026-08-19/20 SQL-only Colaberry import work)
 
-`backend/services/colaberryLiveLoginSessionManager.js` shells out to the `docker` CLI directly (sibling-container pattern, not Docker-in-Docker) to spawn/tear down per-session browser containers over the mounted host socket. Those sibling containers publish their ports as `-p 127.0.0.1::PORT` — because the backend talks to the **host's** Docker daemon over the mounted socket, that bind is to the **host's** loopback, not the backend container's own network namespace.
+**Historical note, kept for context:** this stack used to run `backend` and `frontend` with `network_mode: host` and a mounted `/var/run/docker.sock`, because `colaberryLiveLoginSessionManager.js` spawned sibling browser containers (over the mounted socket) that published their ports to the **host's** `127.0.0.1` — reachable only if the backend shared the host's network namespace too. That was a deliberate call at the time: full live-login feature parity, accepting the larger blast radius (root-equivalent host access from inside the backend container if it were ever compromised).
 
-Concretely: `waitForDriverReady()` and `colaberryLiveLoginWsProxy.js` connect to `http://127.0.0.1:<assignedPort>`. Under normal Docker bridge networking, that `127.0.0.1` resolves to the container itself — those connections would simply fail. The fix is that **the backend service runs with `network_mode: host`**, so its `127.0.0.1` really is the host's loopback, matching what the sibling containers publish to.
+**That tradeoff is gone.** As of PROGRESS.md M101/M102, Colaberry project import is SQL-only — it never drives live-login at all, and the feature is structurally unreachable through the UI (confirmed by tracing every code path that could open it; see that session's investigation). A fresh deployment has no reason to accept that blast radius for a feature nothing can trigger, so new servers use plain, isolated Compose networking:
 
-This one setting cascades into everything else in `docker-compose.yml`:
-- Postgres and Redis publish to `127.0.0.1` on the **host** (not an isolated Compose network) — the host-networked backend reaches them via `localhost:<port>`, not Docker DNS service names.
-- The frontend/nginx container is *also* `network_mode: host`, for the same reason: its `/api/*` reverse-proxy target (`127.0.0.1:5000`) only resolves correctly under host networking.
-- The backend's own port (5000) ends up directly on the host network — the Hetzner Firewall (below) is what keeps it from being publicly reachable, not Compose.
-- The `colaberry-live-login` image is *not* part of `docker-compose.yml` — the backend's `docker run` calls resolve it by name against the host daemon's local image cache, so it has to be built once, directly on the host, separately.
+- `backend` and `frontend` join Compose's normal default network — no `network_mode: host`, no socket mount.
+- `backend` reaches Postgres/Redis by Docker DNS service name (`postgres:5432`, `redis:6379`), not `localhost`.
+- `frontend`'s nginx reverse-proxies `/api/*` to `http://backend:5000` (Docker DNS), not `127.0.0.1:5000`.
+- `frontend` publishes 80/443 to the host via an explicit Compose port mapping instead of inheriting them from host networking.
+- The `colaberry-live-login` sibling-container image never needs building at all — that runbook step (previously "8. Build the colaberry-live-login image") is skipped entirely for new deployments.
+- `colaberryLiveLoginSessionManager.js`'s startup-time orphan-container sweep detects the missing socket (`fs.existsSync('/var/run/docker.sock')`) and logs one clear "skipped" line instead of erroring — the app boots clean with no Docker CLI or socket access at all.
 
-**Chose full socket mount over skipping live-login** — accepted the larger blast radius (root-equivalent host access from inside the backend container if it's ever compromised) for full feature parity from day one. This was a deliberate call, not a default.
+The live-login code itself (`colaberryLiveLoginSessionManager.js`, `colaberryLiveLoginWsProxy.js`, the routes, the frontend's "Connect Colaberry"/live-login modal) is **not deleted** — it's dead code pending a separate cleanup pass, per PROGRESS.md M101's plan. This section just documents that new deployments no longer need to accept its infrastructure cost to run the rest of the app.
 
 ### Secrets: real credentials carried over, everything else generated fresh on the server
 
@@ -143,14 +144,20 @@ su - deploy -c 'git clone git@github.com-portfolio:KesetebirhanDelele/portfolio.
 
 ### 5. Configure the Hetzner Firewall
 
-Only two rules needed: SSH from your own IP, HTTP open to everyone. **Never** open 5432/6379/5000 publicly — Postgres/Redis stay loopback-only regardless, and 5000 is meant to be reached only through nginx's proxy on 80.
+Three rules needed: SSH from your own IP, HTTP and HTTPS open to everyone (80 for certbot's renewal challenge and the plain-HTTP→HTTPS redirect, 443 for the real TLS traffic — see the "Path to real production" TLS section below; this was originally documented as just 80, before TLS landed on 2026-08-16, and never updated — fixed here). **Never** open 5432/6379/5000 publicly — Postgres/Redis stay loopback-only regardless, and 5000 is meant to be reached only through nginx's proxy.
 
 Fastest, repeatable way — via the Hetzner API (needs an API token: Console → Security → API Tokens → generate with Read & Write; keep it in a local `.env`, never in chat/logs):
 
 ```bash
 MY_IP=$(curl -s https://api.ipify.org)
-SERVER_ID=$(curl -s -H "Authorization: Bearer $HETZNER_API_KEY" "https://api.hetzner.cloud/v1/servers" \
-  | node -e "let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>console.log(JSON.parse(d).servers[0].id))")
+
+# If more than one server exists on the account at once (e.g. mid-migration,
+# old + new side by side), .servers[0] is NOT guaranteed to be the new one —
+# list them all and pick the right id explicitly rather than trusting index 0:
+curl -s -H "Authorization: Bearer $HETZNER_API_KEY" "https://api.hetzner.cloud/v1/servers" \
+  | node -e "let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>{JSON.parse(d).servers.forEach(s=>console.log(s.id, s.name, s.public_net.ipv4.ip))})"
+# then:
+SERVER_ID=<the id that matches the NEW server's name/IP from the listing above>
 
 curl -s -X POST "https://api.hetzner.cloud/v1/firewalls" \
   -H "Authorization: Bearer $HETZNER_API_KEY" -H "Content-Type: application/json" \
@@ -158,13 +165,14 @@ curl -s -X POST "https://api.hetzner.cloud/v1/firewalls" \
     \"name\": \"portfolio-firewall\",
     \"rules\": [
       {\"direction\": \"in\", \"protocol\": \"tcp\", \"port\": \"22\", \"source_ips\": [\"${MY_IP}/32\"]},
-      {\"direction\": \"in\", \"protocol\": \"tcp\", \"port\": \"80\", \"source_ips\": [\"0.0.0.0/0\", \"::/0\"]}
+      {\"direction\": \"in\", \"protocol\": \"tcp\", \"port\": \"80\", \"source_ips\": [\"0.0.0.0/0\", \"::/0\"]},
+      {\"direction\": \"in\", \"protocol\": \"tcp\", \"port\": \"443\", \"source_ips\": [\"0.0.0.0/0\", \"::/0\"]}
     ],
     \"apply_to\": [{\"type\": \"server\", \"server\": {\"id\": ${SERVER_ID}}}]
   }"
 ```
 
-Verify: SSH still works, `curl http://$SERVER/` returns 200, `curl http://$SERVER:5000/` times out (blocked, correct).
+Verify: SSH still works, `curl http://$SERVER/` returns a redirect to the nip.io HTTPS origin (200 once TLS is up in step 9+ below), `curl http://$SERVER:5000/` times out (blocked, correct).
 
 If your own IP changes (new location, VPN), update the rule's `source_ips` via the Hetzner API or you'll lock yourself out of SSH. **See "Troubleshooting: Recovering SSH Access" below the first time this happens** — check the firewall before touching keys, passwords, or the console.
 
@@ -214,11 +222,9 @@ su - deploy -c "sed -i 's#^FRONTEND_URL=.*#FRONTEND_URL=http://${SERVER}#' /opt/
 
 This is simpler here than in local dev: because nginx reverse-proxies `/api/*` on the *same* origin as the frontend, `FRONTEND_URL` and the OAuth redirect are identical up to the `/api/` prefix. This is a one-time change you make as the app owner — individual users never see GitHub developer settings, just the normal "Authorize" consent screen.
 
-### 8. Build the `colaberry-live-login` image (once, directly on the host — not part of Compose)
+### 8. ~~Build the `colaberry-live-login` image~~ — skipped
 
-```bash
-su - deploy -c 'docker build -t colaberry-live-login /opt/portfolio/backend/services/colaberry-live-login/image/'
-```
+Not needed as of the "Normal Compose networking" architecture change above — the live-login sibling-container image is only ever used by a feature that's now structurally unreachable. Nothing in this step applies to a new deployment; kept here only so the step numbering below matches history.
 
 ### 9. Bring the stack up
 
@@ -247,8 +253,8 @@ getNetworkProjects().then(p => console.log('OK -', p.length, 'projects')).catch(
 - Visit `http://$SERVER/` — login page loads.
 - "Sign in with GitHub" → authorize → land back on `http://$SERVER/`, logged in.
 - Confirm a real row: `docker compose exec postgres psql -U <POSTGRES_USER> -d <POSTGRES_DB> -c "SELECT github_username, created_at FROM users;"`.
-- Test a Colaberry import (exercises item 10 for real).
-- If testing live-login: confirm a session actually starts — this is the one piece that specifically validates the `network_mode: host` + Docker-socket design end-to-end.
+- Test a Colaberry import (exercises item 10 for real) — SQL-only as of M101/M102, no live-login step involved.
+- Live-login itself is not part of the golden path for a new deployment — it's dead code (structurally unreachable via the UI), and new servers don't even mount the Docker socket it would need. Nothing to test here.
 
 ---
 
@@ -290,14 +296,14 @@ If `ssh root@$SERVER` (or `ssh deploy@$SERVER`) suddenly stops working — conne
 curl -4 ifconfig.me    # your current IPv4 — the ONLY thing that changes on your end
 ```
 
-Compare against what the firewall currently allows (needs `HETZNER_API_KEY` from `.env` — never print the key itself, only use it in the `Authorization` header):
+Compare against what the firewall currently allows (needs `HETZNER_API_KEY` from `.env` — never print the key itself, only use it in the `Authorization` header). **Firewall ID `11470214` below is the current server's** — once the migration to a new server (see "Path to real production" section) is complete and the old server is decommissioned, this whole section needs re-pointing at the new firewall's own ID:
 
 ```bash
 curl -s https://api.hetzner.cloud/v1/firewalls/11470214 \
   -H "Authorization: Bearer $HETZNER_API_KEY" | grep -A3 '"port": "22"'
 ```
 
-If `source_ips` doesn't contain your current IP, that's the entire problem — nothing wrong with your key, your password, or the server. Fix it with one API call (replace `<YOUR_IP>`):
+If `source_ips` doesn't contain your current IP, that's the entire problem — nothing wrong with your key, your password, or the server. Fix it with one API call (replace `<YOUR_IP>` — and note this `set_rules` call REPLACES the entire ruleset, so 80/443 must be included every time, not just 22, or you'll silently lock out the live site while fixing SSH):
 
 ```bash
 curl -s -X POST https://api.hetzner.cloud/v1/firewalls/11470214/actions/set_rules \
@@ -305,7 +311,8 @@ curl -s -X POST https://api.hetzner.cloud/v1/firewalls/11470214/actions/set_rule
   -H "Content-Type: application/json" \
   -d '{"rules": [
     {"direction": "in", "protocol": "tcp", "port": "22", "source_ips": ["<YOUR_IP>/32"]},
-    {"direction": "in", "protocol": "tcp", "port": "80", "source_ips": ["0.0.0.0/0", "::/0"]}
+    {"direction": "in", "protocol": "tcp", "port": "80", "source_ips": ["0.0.0.0/0", "::/0"]},
+    {"direction": "in", "protocol": "tcp", "port": "443", "source_ips": ["0.0.0.0/0", "::/0"]}
   ]}'
 ```
 
@@ -353,7 +360,7 @@ Always back up before a schema-changing migration.
 - [ ] Database/Redis/JWT/encryption secrets are fresh, not copied from dev
 - [ ] `FRONTEND_URL` matches the real server address
 - [ ] GitHub OAuth Redirect URI matches `FRONTEND_URL`
-- [ ] Hetzner Firewall: only 22 (your IP) and 80 (any) open
+- [ ] Hetzner Firewall: only 22 (your IP), 80 and 443 (any) open
 - [ ] `docker compose ps` shows all services healthy
 - [ ] `docker compose logs migrate` shows a clean exit
 - [ ] Colaberry SQL Server reachability confirmed
