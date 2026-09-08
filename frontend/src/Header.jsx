@@ -4,6 +4,7 @@ import PortfolioBuilder from './PortfolioBuilder'
 import ColaberryLiveLogin from './ColaberryLiveLogin'
 import { authFetch, BASE_URL } from './api'
 import { RepoCardSkeleton } from './Skeleton'
+import { Button } from './components/ui/Button'
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -77,20 +78,20 @@ function NetworkFilterDropdown({ label, options, selected, onToggle }) {
       <button
         type="button"
         onClick={() => setIsOpen(o => !o)}
-        className="flex items-center justify-between gap-2 text-sm border border-gray-200 rounded-xl px-3 py-2 bg-white hover:border-gray-300 transition w-full"
+        className="flex items-center justify-between gap-2 text-sm border border-line-subtle rounded-xl px-3 py-2 bg-white hover:border-line transition w-full"
       >
         <span className="truncate">{label}{selected.length > 0 ? ` (${selected.length})` : ''}</span>
-        <svg className={`w-3.5 h-3.5 text-gray-400 flex-shrink-0 transition-transform ${isOpen ? 'rotate-180' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
+        <svg className={`w-3.5 h-3.5 text-text-subtle flex-shrink-0 transition-transform ${isOpen ? 'rotate-180' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
           <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
         </svg>
       </button>
       {isOpen && (
-        <div className="absolute z-10 mt-1 w-64 max-h-64 overflow-y-auto bg-white border border-gray-200 rounded-xl shadow-lg p-2">
+        <div className="absolute z-10 mt-1 w-64 max-h-64 overflow-y-auto bg-white border border-line-subtle rounded-xl shadow-lg p-2">
           {options.length === 0 ? (
-            <p className="text-xs text-gray-400 px-2 py-1">No options</p>
+            <p className="text-xs text-text-subtle px-2 py-1">No options</p>
           ) : (
             options.map(opt => (
-              <label key={opt} className="flex items-center gap-2 px-2 py-1.5 rounded-lg hover:bg-gray-50 cursor-pointer text-sm text-gray-700">
+              <label key={opt} className="flex items-center gap-2 px-2 py-1.5 rounded-lg hover:bg-surface-subtle cursor-pointer text-sm text-text-body">
                 <input
                   type="checkbox"
                   checked={selected.includes(opt)}
@@ -185,8 +186,15 @@ function Header({ onLogout }) {
       await Promise.all([...analyzingFullNames].map(async fullName => {
         const repo = importedRepos.find(r => r.full_name === fullName)
         if (!repo) { done.add(fullName); return }
+        // Colaberry imports never get a deep_analyses row — they run through
+        // the simpler analyses table instead (see colaberryImport.js's top
+        // comment). Polling /api/deep-analysis/:id/latest for one 404s
+        // forever, so this banner never cleared for a Colaberry-only import.
+        const statusUrl = repo.provider === 'colaberry'
+          ? `${BASE_URL}/api/analysis/repo/${repo.id}`
+          : `${BASE_URL}/api/deep-analysis/${repo.id}/latest`
         try {
-          const res = await fetch(`${BASE_URL}/api/deep-analysis/${repo.id}/latest`, {
+          const res = await fetch(statusUrl, {
             headers: { Authorization: `Bearer ${token}` },
           })
           const json = await res.json()
@@ -383,6 +391,25 @@ function Header({ onLogout }) {
   // cookies have actually gone stale) — previously this modal showed
   // unconditionally on every attempt, which read as "getting logged out"
   // every few minutes even though the stored session was often still fine.
+  // Polls GET /api/heavy-tasks/:jobId/status until the job leaves the
+  // waiting/active state. onUpdate fires on every tick (including the final
+  // one) so the caller can drive a "you're #N in line" banner; the return
+  // value is the terminal { state: 'completed'|'failed', ... } payload, or
+  // null if the connection was lost (e.g. token expired mid-wait — authFetch
+  // returns null on 401 without a logout callback here, same as this
+  // function's pre-existing behavior for the initial POST).
+  async function pollHeavyTaskStatus(jobId, { intervalMs = 3000, onUpdate } = {}) {
+    for (;;) {
+      const res = await authFetch(`${BASE_URL}/api/heavy-tasks/${jobId}/status`)
+      if (!res) return null
+      const body = await res.json()
+      if (!body.success) return null
+      onUpdate?.(body.data)
+      if (body.data.state === 'completed' || body.data.state === 'failed') return body.data
+      await new Promise(r => setTimeout(r, intervalMs))
+    }
+  }
+
   async function runColaberryImport(links) {
     setShowColaberryLogin(false)
     setColaberryBanner('Importing your Colaberry projects…')
@@ -400,19 +427,51 @@ function Header({ onLogout }) {
         setShowColaberryLogin(true)
         return
       }
-      if (!body?.success && body?.data?.imported?.length === 0 && body?.data?.failed?.length === 0) {
-        setColaberryBanner('Connected — no Colaberry projects found for your account.')
-      } else if (!body?.success) {
+      if (!body?.success) {
         setColaberryBanner(`Import failed: ${body?.error?.message || 'Unknown error.'}`)
-      } else {
-        const { imported, failed } = body.data
-        setColaberryBanner(
-          `Imported ${imported.length} Colaberry project${imported.length === 1 ? '' : 's'}` +
-          (failed?.length ? ` (${failed.length} failed)` : '') + '.'
-        )
-        setAnalyzingFullNames(prev => new Set([...prev, ...imported.map(p => p.title)]))
-        fetchImportedReposAndMaybeAutoImport()
+        return
       }
+      if (!body.data.jobId) {
+        // Auto-discovery found nothing — no background job was enqueued.
+        setColaberryBanner('Connected — no Colaberry projects found for your account.')
+        return
+      }
+
+      const info = await pollHeavyTaskStatus(body.data.jobId, {
+        onUpdate: (i) => {
+          if (i.state !== 'waiting' && i.state !== 'active') return
+          const etaText = i.etaMs ? ` — about ${Math.max(1, Math.round(i.etaMs / 1000))}s` : ''
+          setColaberryBanner(
+            i.position > 1
+              ? `You're #${i.position} in line…${etaText}`
+              : `Importing your Colaberry projects…${etaText}`
+          )
+        },
+      })
+
+      if (!info) {
+        setColaberryBanner('Import failed: lost connection while waiting.')
+        return
+      }
+      if (info.state === 'failed') {
+        const message = info.error || 'Unknown error.'
+        if (message.startsWith('SESSION_EXPIRED:')) {
+          setColaberryLinksToImport(links)
+          setColaberryBanner(null)
+          setShowColaberryLogin(true)
+          return
+        }
+        setColaberryBanner(`Import failed: ${message}`)
+        return
+      }
+
+      const { imported, failed } = info.result
+      setColaberryBanner(
+        `Imported ${imported.length} Colaberry project${imported.length === 1 ? '' : 's'}` +
+        (failed?.length ? ` (${failed.length} failed)` : '') + '.'
+      )
+      setAnalyzingFullNames(prev => new Set([...prev, ...imported.map(p => p.title)]))
+      fetchImportedReposAndMaybeAutoImport()
     } catch (err) {
       setColaberryBanner(`Import failed: ${err.message}`)
     }
@@ -622,35 +681,35 @@ function Header({ onLogout }) {
     <div className="min-h-screen p-4" style={{ background: 'linear-gradient(135deg, #f8f9ff 0%, #f0f4ff 50%, #faf8ff 100%)' }}>
 
       {/* NAVBAR */}
-      <div className="flex items-center justify-between px-6 py-3.5 bg-white/90 backdrop-blur border border-gray-200/80 rounded-2xl shadow-sm">
+      <div className="flex items-center justify-between px-6 py-3.5 bg-white/90 backdrop-blur border border-line-subtle/80 rounded-2xl shadow-sm">
         <div className="flex items-center gap-3">
           <div className="w-9 h-9 rounded-xl flex items-center justify-center text-white font-bold text-base shadow-md" style={{ background: 'linear-gradient(135deg, #4f46e5, #7c3aed)' }}>
             R
           </div>
           <h1 className="text-lg font-bold tracking-tight">
-            <span className="text-gray-900">Repo2</span>
+            <span className="text-text-strong">Repo2</span>
             <span style={{ color: '#4f46e5' }}>Reputation</span>
           </h1>
         </div>
         <div className="flex items-center gap-2">
           {githubUsername && (
-            <div className="flex items-center gap-2 px-3 py-1.5 rounded-xl border border-gray-200 bg-gray-50">
+            <div className="flex items-center gap-2 px-3 py-1.5 rounded-xl border border-line-subtle bg-surface-subtle">
               {avatarUrl
-                ? <img src={avatarUrl} alt={githubUsername} className="w-6 h-6 rounded-full ring-1 ring-gray-200" />
-                : <span className="w-6 h-6 rounded-full bg-indigo-100 flex items-center justify-center text-indigo-600 text-xs font-bold">{githubUsername[0].toUpperCase()}</span>
+                ? <img src={avatarUrl} alt={githubUsername} className="w-6 h-6 rounded-full ring-1 ring-line-subtle" />
+                : <span className="w-6 h-6 rounded-full bg-brand-100 flex items-center justify-center text-brand-600 text-xs font-bold">{githubUsername[0].toUpperCase()}</span>
               }
-              <span className="text-sm font-medium text-gray-700">@{githubUsername}</span>
+              <span className="text-sm font-medium text-text-body">@{githubUsername}</span>
             </div>
           )}
           <a
             href="/settings"
-            className="px-4 py-1.5 rounded-xl border border-gray-200 bg-white hover:bg-gray-50 transition text-sm text-gray-600 font-medium"
+            className="px-4 py-1.5 rounded-xl border border-line-subtle bg-white hover:bg-surface-subtle transition text-sm text-text-muted font-medium"
           >
             Settings
           </a>
           <button
             onClick={onLogout}
-            className="px-4 py-1.5 rounded-xl border border-gray-200 bg-white hover:bg-gray-50 transition text-sm text-gray-600 font-medium"
+            className="px-4 py-1.5 rounded-xl border border-line-subtle bg-white hover:bg-surface-subtle transition text-sm text-text-muted font-medium"
           >
             Logout
           </button>
@@ -659,27 +718,27 @@ function Header({ onLogout }) {
 
       {/* AUTO-IMPORT LOADING SCREEN */}
       {autoImporting && (
-        <div className="mt-4 bg-white border border-gray-200 rounded-2xl p-12 shadow-sm flex flex-col items-center justify-center gap-5 text-center">
+        <div className="mt-4 bg-white border border-line-subtle rounded-2xl p-12 shadow-sm flex flex-col items-center justify-center gap-5 text-center">
           <div style={{ width: 56, height: 56, borderRadius: '50%', background: 'linear-gradient(135deg,#4361ee,#7c3aed)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
             <span style={{ fontSize: 26 }}>⚙️</span>
           </div>
           <div>
-            <h2 className="text-xl font-bold text-gray-900 mb-1">Setting up your portfolio…</h2>
-            <p className="text-sm text-gray-500">Importing your 10 most recent GitHub repositories. This takes about a minute.</p>
+            <h2 className="text-xl font-bold text-text-strong mb-1">Setting up your portfolio…</h2>
+            <p className="text-sm text-text-muted">Importing your 10 most recent GitHub repositories. This takes about a minute.</p>
           </div>
           <div style={{ width: '100%', maxWidth: 320, height: 6, background: '#e5e7eb', borderRadius: 99, overflow: 'hidden' }}>
             <div style={{ height: '100%', background: 'linear-gradient(90deg,#4361ee,#7c3aed)', borderRadius: 99, animation: 'r2r-progress 1.8s ease-in-out infinite' }} />
           </div>
           <style>{`@keyframes r2r-progress { 0%{width:10%} 50%{width:80%} 100%{width:10%} }`}</style>
-          <p className="text-xs text-gray-400">GitHub connected · Top 10 repos by recent activity</p>
+          <p className="text-xs text-text-subtle">GitHub connected · Top 10 repos by recent activity</p>
         </div>
       )}
 
       {/* MAIN SECTION */}
-      {!autoImporting && <div className="mt-4 bg-white border border-gray-100 rounded-2xl shadow-md overflow-hidden">
+      {!autoImporting && <div className="mt-4 bg-white border border-line-subtle rounded-2xl shadow-md overflow-hidden">
 
         {/* Tabs */}
-        <div className="flex items-center gap-1 px-6 pt-4 border-b border-gray-100">
+        <div className="flex items-center gap-1 px-6 pt-4 border-b border-line-subtle">
           {[
             { key: 'browse',    label: 'Add More Repos', icon: '＋' },
             { key: 'portfolio', label: 'My Portfolio',   icon: '◈' },
@@ -689,8 +748,8 @@ function Header({ onLogout }) {
               onClick={() => handleTabSwitch(tab.key)}
               className={`flex items-center gap-1.5 px-4 py-2.5 text-sm font-semibold rounded-t-lg transition outline-none border-b-2 -mb-px ${
                 activeTab === tab.key
-                  ? 'text-indigo-600 border-indigo-500 bg-indigo-50/60'
-                  : 'text-gray-400 border-transparent hover:text-gray-600 hover:bg-gray-50'
+                  ? 'text-brand-600 border-brand-500 bg-brand-50/60'
+                  : 'text-text-subtle border-transparent hover:text-text-muted hover:bg-surface-subtle'
               }`}
             >
               <span className="text-xs">{tab.icon}</span>
@@ -714,7 +773,7 @@ function Header({ onLogout }) {
                 { n: 3, label: 'Build Portfolio', done: false },
               ]
               return (
-                <div className="mb-5 flex items-center justify-between px-4 py-3 rounded-xl border border-indigo-100/80 bg-gradient-to-r from-indigo-50/60 to-purple-50/40 relative">
+                <div className="mb-5 flex items-center justify-between px-4 py-3 rounded-xl border border-brand-100/80 bg-gradient-to-r from-brand-50/60 to-purple-50/40 relative">
                   <div className="flex items-center gap-3 flex-1">
                     {steps.map((step, i) => {
                       const isCurrent = !step.done && (i === 0 || steps[i - 1].done)
@@ -722,16 +781,16 @@ function Header({ onLogout }) {
                         <div key={step.n} className="flex items-center gap-2">
                           <div className={`w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold flex-shrink-0 ${
                             step.done   ? 'bg-emerald-500 text-white'
-                            : isCurrent ? 'bg-indigo-600 text-white shadow-md shadow-indigo-200'
-                                        : 'bg-white border-2 border-gray-200 text-gray-400'
+                            : isCurrent ? 'bg-brand-600 text-white shadow-md shadow-brand-200'
+                                        : 'bg-white border-2 border-line-subtle text-text-subtle'
                           }`}>
                             {step.done ? '✓' : step.n}
                           </div>
                           <span className={`text-xs font-semibold whitespace-nowrap ${
-                            step.done ? 'text-emerald-600' : isCurrent ? 'text-indigo-700' : 'text-gray-400'
+                            step.done ? 'text-emerald-600' : isCurrent ? 'text-brand-700' : 'text-text-subtle'
                           }`}>{step.label}</span>
                           {i < steps.length - 1 && (
-                            <div className={`h-px w-8 mx-1 ${step.done ? 'bg-emerald-300' : 'bg-gray-200'}`} />
+                            <div className={`h-px w-8 mx-1 ${step.done ? 'bg-emerald-300' : 'bg-neutral-200'}`} />
                           )}
                         </div>
                       )
@@ -739,7 +798,7 @@ function Header({ onLogout }) {
                   </div>
                   <button
                     onClick={dismissOnboarding}
-                    className="text-gray-300 hover:text-gray-500 text-base leading-none ml-4 flex-shrink-0"
+                    className="text-text-subtle hover:text-text-muted text-base leading-none ml-4 flex-shrink-0"
                   >×</button>
                 </div>
               )
@@ -747,14 +806,14 @@ function Header({ onLogout }) {
 
             {/* Analysis-in-progress banner */}
             {analyzingFullNames.size > 0 && (
-              <div className="flex items-center justify-between mb-4 px-4 py-2.5 rounded-xl border border-blue-200 bg-blue-50">
-                <span className="text-sm text-blue-700 font-medium">
+              <div className="flex items-center justify-between mb-4 px-4 py-2.5 rounded-xl border border-berry-200 bg-berry-50">
+                <span className="text-sm text-berry-700 font-medium">
                   ⏳ Analyzing {analyzingFullNames.size} {analyzingFullNames.size === 1 ? 'repo' : 'repos'} in the background…
                 </span>
                 <div className="flex items-center gap-2">
                   <button
                     onClick={() => handleTabSwitch('portfolio')}
-                    className="px-3 py-1.5 rounded-lg border border-blue-300 bg-white text-blue-700 text-xs font-semibold hover:bg-blue-50 transition"
+                    className="px-3 py-1.5 rounded-lg border border-berry-300 bg-white text-berry-700 text-xs font-semibold hover:bg-berry-50 transition"
                   >
                     View progress →
                   </button>
@@ -779,7 +838,7 @@ function Header({ onLogout }) {
             {/* CONNECTED ACCOUNT CARDS */}
             {!loading && allAccounts.length > 0 && (
               <div className="mb-5">
-                <p className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2.5">GitHub Accounts</p>
+                <p className="text-xs font-semibold text-text-subtle uppercase tracking-wider mb-2.5">GitHub Accounts</p>
                 <div className="flex flex-wrap gap-2">
                   {allAccounts.map(acc => {
                     const key          = acc.username.toLowerCase()
@@ -795,8 +854,8 @@ function Header({ onLogout }) {
                           isConfirming
                             ? 'border-red-200 bg-red-50 cursor-default'
                             : isSelected
-                            ? 'border-indigo-300 bg-indigo-50 shadow-sm cursor-pointer'
-                            : 'border-gray-200 bg-white hover:border-indigo-200 hover:shadow-sm cursor-pointer'
+                            ? 'border-brand-300 bg-brand-50 shadow-sm cursor-pointer'
+                            : 'border-line-subtle bg-white hover:border-brand-200 hover:shadow-sm cursor-pointer'
                         }`}
                       >
                         {/* GitHub avatar */}
@@ -804,11 +863,11 @@ function Header({ onLogout }) {
                           <img
                             src={`https://github.com/${acc.username}.png?size=56`}
                             alt={acc.username}
-                            className={`w-8 h-8 rounded-full ring-2 transition ${isSelected ? 'ring-indigo-400' : 'ring-gray-100'}`}
+                            className={`w-8 h-8 rounded-full ring-2 transition ${isSelected ? 'ring-brand-400' : 'ring-line-subtle'}`}
                             onError={e => { e.target.style.display = 'none'; e.target.nextSibling.style.display = 'flex' }}
                           />
                           <div className={`w-8 h-8 rounded-full hidden items-center justify-center font-bold text-sm ring-2 ${
-                            isSelected ? 'bg-indigo-600 text-white ring-indigo-400' : 'bg-indigo-100 text-indigo-600 ring-gray-100'
+                            isSelected ? 'bg-brand-600 text-white ring-brand-400' : 'bg-brand-100 text-brand-600 ring-line-subtle'
                           }`}>{acc.username[0].toUpperCase()}</div>
                           {/* Online dot */}
                           <div className={`absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full border-2 border-white ${
@@ -819,12 +878,12 @@ function Header({ onLogout }) {
                         {/* Account info */}
                         <div className="min-w-0">
                           <div className="flex items-center gap-1.5">
-                            <span className={`text-xs font-semibold truncate max-w-[100px] ${isSelected ? 'text-indigo-900' : 'text-gray-800'}`}>
+                            <span className={`text-xs font-semibold truncate max-w-[100px] ${isSelected ? 'text-brand-900' : 'text-text-body'}`}>
                               @{acc.username}
                             </span>
                             <span className={`px-1.5 py-0.5 rounded-full text-xs font-medium leading-tight ${
                               isSelected
-                                ? 'bg-indigo-200 text-indigo-700'
+                                ? 'bg-brand-200 text-brand-700'
                                 : acc.isPrimary
                                 ? 'bg-violet-100 text-violet-600'
                                 : acc.isConnected
@@ -834,7 +893,7 @@ function Header({ onLogout }) {
                               {acc.isPrimary ? 'Primary' : acc.isConnected ? 'Private' : 'Public'}
                             </span>
                           </div>
-                          <p className={`text-xs mt-0.5 ${isSelected ? 'text-indigo-500' : 'text-gray-400'}`}>
+                          <p className={`text-xs mt-0.5 ${isSelected ? 'text-brand-500' : 'text-text-subtle'}`}>
                             {count} {count === 1 ? 'repo' : 'repos'}
                           </p>
                         </div>
@@ -860,13 +919,13 @@ function Header({ onLogout }) {
                                 >Yes</button>
                                 <button
                                   onClick={() => setRemoveConfirm(null)}
-                                  className="px-2 py-0.5 rounded-lg bg-white hover:bg-gray-100 text-gray-600 text-xs font-semibold border border-gray-200 transition"
+                                  className="px-2 py-0.5 rounded-lg bg-white hover:bg-surface-sunken text-text-muted text-xs font-semibold border border-line-subtle transition"
                                 >No</button>
                               </div>
                             ) : (
                               <button
                                 onClick={() => setRemoveConfirm(acc.username)}
-                                className="text-gray-300 hover:text-red-400 transition text-base leading-none"
+                                className="text-text-subtle hover:text-red-400 transition text-base leading-none"
                               >×</button>
                             )}
                           </div>
@@ -876,9 +935,9 @@ function Header({ onLogout }) {
                   })}
 
                   {/* Add public username */}
-                  <div className="flex items-center gap-2.5 px-3 py-2.5 rounded-xl border border-dashed border-gray-200 bg-white/70 hover:border-gray-300 transition">
-                    <div className="w-8 h-8 rounded-full bg-gray-100 flex items-center justify-center flex-shrink-0">
-                      <svg className="w-4 h-4 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
+                  <div className="flex items-center gap-2.5 px-3 py-2.5 rounded-xl border border-dashed border-line-subtle bg-white/70 hover:border-line transition">
+                    <div className="w-8 h-8 rounded-full bg-surface-sunken flex items-center justify-center flex-shrink-0">
+                      <svg className="w-4 h-4 text-text-subtle" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
                         <path strokeLinecap="round" strokeLinejoin="round" d="M12 4v16m8-8H4" />
                       </svg>
                     </div>
@@ -889,19 +948,14 @@ function Header({ onLogout }) {
                         value={usernameInput}
                         onChange={e => setUsernameInput(e.target.value)}
                         onKeyDown={e => e.key === 'Enter' && addExtraUsername()}
-                        className="text-xs text-gray-700 placeholder-gray-400 bg-transparent focus:outline-none w-32 block"
+                        className="text-xs text-text-body placeholder-text-subtle bg-transparent focus:outline-none w-32 block"
                       />
-                      <p className="text-xs text-gray-300 mt-0.5">GitHub username or URL</p>
+                      <p className="text-xs text-text-subtle mt-0.5">GitHub username or URL</p>
                     </div>
                     {usernameInput.trim() && (
-                      <button
-                        onClick={addExtraUsername}
-                        disabled={publicImporting !== null}
-                        className="px-2.5 py-1 rounded-lg text-white text-xs font-semibold transition disabled:opacity-50 flex-shrink-0"
-                        style={{ background: 'linear-gradient(135deg, #4f46e5, #7c3aed)' }}
-                      >
+                      <Button size="sm" onClick={addExtraUsername} disabled={publicImporting !== null} className="flex-shrink-0">
                         Add
-                      </button>
+                      </Button>
                     )}
                   </div>
 
@@ -1027,18 +1081,18 @@ function Header({ onLogout }) {
               }
 
               return (
-                <div className="fixed inset-0 bg-gray-900/60 flex items-center justify-center z-50 p-4">
+                <div className="fixed inset-0 bg-neutral-900/60 flex items-center justify-center z-50 p-4">
                   <div className="bg-white rounded-2xl shadow-xl w-full max-w-2xl overflow-hidden flex flex-col" style={{ maxHeight: '85vh' }}>
-                    <div className="px-6 py-4 border-b border-gray-100">
+                    <div className="px-6 py-4 border-b border-line-subtle">
                       <div className="flex items-center justify-between">
-                        <h3 className="text-lg font-bold text-gray-900">Which Colaberry projects?</h3>
+                        <h3 className="text-lg font-bold text-text-strong">Which Colaberry projects?</h3>
                         {selectedNetworkLinks.length > 0 && (
-                          <span className="text-xs font-semibold text-indigo-600 bg-indigo-50 px-2.5 py-1 rounded-full">
+                          <span className="text-xs font-semibold text-brand-600 bg-brand-50 px-2.5 py-1 rounded-full">
                             {selectedNetworkLinks.length} selected
                           </span>
                         )}
                       </div>
-                      <p className="text-sm text-gray-500 mt-1">
+                      <p className="text-sm text-text-muted mt-1">
                         Browse Colaberry's network catalog and check the ones you want — not limited to
                         projects tied to your own account. Or paste a specific link directly. Leave everything
                         empty to auto-import your own projects instead.
@@ -1047,7 +1101,7 @@ function Header({ onLogout }) {
                         <button
                           onClick={() => setColaberryLinksMode('network')}
                           className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition ${
-                            colaberryLinksMode === 'network' ? 'bg-indigo-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                            colaberryLinksMode === 'network' ? 'bg-brand-600 text-white' : 'bg-surface-sunken text-text-muted hover:bg-neutral-200'
                           }`}
                         >
                           Browse Network Projects
@@ -1055,7 +1109,7 @@ function Header({ onLogout }) {
                         <button
                           onClick={() => setColaberryLinksMode('paste')}
                           className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition ${
-                            colaberryLinksMode === 'paste' ? 'bg-indigo-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                            colaberryLinksMode === 'paste' ? 'bg-brand-600 text-white' : 'bg-surface-sunken text-text-muted hover:bg-neutral-200'
                           }`}
                         >
                           Paste a Link
@@ -1070,7 +1124,7 @@ function Header({ onLogout }) {
                           onChange={e => setColaberryLinksInput(e.target.value)}
                           placeholder="https://app.colaberry.com/app/network/network/...&#10;https://app.colaberry.com/app/network/network/..."
                           rows={5}
-                          className="w-full text-sm border border-gray-200 rounded-xl px-3 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-200"
+                          className="w-full text-sm border border-line-subtle rounded-xl px-3 py-2 focus:outline-none focus:ring-2 focus:ring-brand-200"
                         />
                       ) : (
                         <>
@@ -1096,26 +1150,30 @@ function Header({ onLogout }) {
                               value={networkSearchQuery}
                               onChange={e => setNetworkSearchQuery(e.target.value)}
                               placeholder="Search by project name or tag…"
-                              className="flex-1 text-sm border border-gray-200 rounded-xl px-3 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-200"
+                              className="flex-1 text-sm border border-line-subtle rounded-xl px-3 py-2 focus:outline-none focus:ring-2 focus:ring-brand-200"
                             />
-                            <button
+                            <Button
+                              variant="outline"
+                              size="sm"
                               onClick={toggleSelectAllVisible}
                               disabled={visibleNetworkProjects.length === 0}
-                              className="px-3 py-2 rounded-xl text-xs font-semibold border border-indigo-200 text-indigo-600 hover:bg-indigo-50 disabled:opacity-40 disabled:cursor-not-allowed transition whitespace-nowrap"
+                              className="whitespace-nowrap"
                             >
                               {allVisibleSelected ? 'Clear All' : 'Select All'}
-                            </button>
+                            </Button>
                             {hasActiveFilters && (
-                              <button
+                              <Button
+                                variant="ghost"
+                                size="sm"
                                 onClick={() => {
                                   setNetworkSearchQuery('')
                                   setNetworkSelectedCategories([])
                                   setNetworkSelectedTags([])
                                 }}
-                                className="px-3 py-2 rounded-xl text-xs font-semibold border border-gray-200 text-gray-500 hover:bg-gray-50 transition whitespace-nowrap"
+                                className="whitespace-nowrap"
                               >
                                 Clear filters
-                              </button>
+                              </Button>
                             )}
                           </div>
 
@@ -1125,16 +1183,16 @@ function Header({ onLogout }) {
 
                           <div className="space-y-2">
                             {isLoadingNetworkProjects ? (
-                              <p className="text-sm text-gray-400 text-center py-8">Loading network projects…</p>
+                              <p className="text-sm text-text-subtle text-center py-8">Loading network projects…</p>
                             ) : visibleNetworkProjects.length === 0 ? (
-                              <p className="text-sm text-gray-400 text-center py-8">
+                              <p className="text-sm text-text-subtle text-center py-8">
                                 {hasActiveFilters ? 'No projects match your filters.' : 'No network projects found.'}
                               </p>
                             ) : (
                               visibleNetworkProjects.map(project => (
                                 <label
                                   key={project.networkId}
-                                  className="flex items-center gap-3 border border-gray-100 rounded-xl px-3 py-2.5 hover:border-indigo-200 cursor-pointer transition"
+                                  className="flex items-center gap-3 border border-line-subtle rounded-xl px-3 py-2.5 hover:border-brand-200 cursor-pointer transition"
                                 >
                                   <input
                                     type="checkbox"
@@ -1143,13 +1201,13 @@ function Header({ onLogout }) {
                                     className="flex-shrink-0"
                                   />
                                   {project.imageUrl?.startsWith('http') && (
-                                    <img src={project.imageUrl} alt="" className="w-12 h-12 rounded-lg object-cover flex-shrink-0 bg-gray-100" />
+                                    <img src={project.imageUrl} alt="" className="w-12 h-12 rounded-lg object-cover flex-shrink-0 bg-surface-sunken" />
                                   )}
                                   <div className="min-w-0">
-                                    <p className="text-sm font-semibold text-gray-900 truncate">{project.title}</p>
-                                    <p className="text-xs text-gray-500 line-clamp-2">{project.summary}</p>
+                                    <p className="text-sm font-semibold text-text-strong truncate">{project.title}</p>
+                                    <p className="text-xs text-text-muted line-clamp-2">{project.summary}</p>
                                     {project.tags && (
-                                      <p className="text-[10px] text-indigo-400 truncate mt-0.5">{project.tags}</p>
+                                      <p className="text-[10px] text-brand-400 truncate mt-0.5">{project.tags}</p>
                                     )}
                                   </div>
                                 </label>
@@ -1163,10 +1221,10 @@ function Header({ onLogout }) {
                       )}
                     </div>
 
-                    <div className="px-6 py-4 border-t border-gray-100 flex items-center justify-between flex-shrink-0">
+                    <div className="px-6 py-4 border-t border-line-subtle flex items-center justify-between flex-shrink-0">
                       <button
                         onClick={() => setShowColaberryLinksPrompt(false)}
-                        className="px-4 py-2 rounded-xl text-sm font-semibold text-gray-600 hover:bg-gray-50 transition"
+                        className="px-4 py-2 rounded-xl text-sm font-semibold text-text-muted hover:bg-surface-subtle transition"
                       >
                         Cancel
                       </button>
@@ -1177,16 +1235,11 @@ function Header({ onLogout }) {
                             setShowColaberryLinksPrompt(false)
                             runColaberryImport([])
                           }}
-                          className="px-4 py-2 rounded-xl text-sm font-semibold text-indigo-600 hover:bg-indigo-50 transition"
+                          className="px-4 py-2 rounded-xl text-sm font-semibold text-brand-600 hover:bg-brand-50 transition"
                         >
                           Skip — import my own
                         </button>
-                        <button
-                          onClick={handleContinue}
-                          className="px-5 py-2 rounded-xl text-sm font-semibold text-white bg-indigo-600 hover:bg-indigo-700 transition"
-                        >
-                          Continue
-                        </button>
+                        <Button size="sm" onClick={handleContinue}>Continue</Button>
                       </div>
                     </div>
                   </div>
@@ -1204,7 +1257,7 @@ function Header({ onLogout }) {
             {/* SEARCH */}
             <div className="flex items-center gap-3 mb-4">
               <div className="flex-1 relative">
-                <svg className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
+                <svg className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-text-subtle" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
                   <path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
                 </svg>
                 <input
@@ -1212,11 +1265,11 @@ function Header({ onLogout }) {
                   placeholder="Search repositories…"
                   value={searchQuery}
                   onChange={e => { setSearchQuery(e.target.value); setCurrentPage(1) }}
-                  className="w-full pl-10 pr-4 py-2.5 rounded-xl border border-gray-200 bg-gray-50/60 text-sm text-gray-800 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-indigo-200 focus:border-indigo-300 focus:bg-white transition"
+                  className="w-full pl-10 pr-4 py-2.5 rounded-xl border border-line-subtle bg-surface-subtle/60 text-sm text-text-body placeholder-text-subtle focus:outline-none focus:ring-2 focus:ring-brand-200 focus:border-brand-300 focus:bg-white transition"
                 />
               </div>
               {!loading && repos.length > 0 && searchQuery.trim() && (
-                <p className="text-xs text-gray-400 whitespace-nowrap font-medium">
+                <p className="text-xs text-text-subtle whitespace-nowrap font-medium">
                   {filteredRepos.length} / {repos.length}
                 </p>
               )}
@@ -1240,8 +1293,8 @@ function Header({ onLogout }) {
               </div>
             )}
             {publicImporting && (
-              <div className="flex items-center gap-3 mb-4 px-4 py-3 rounded-xl border border-indigo-200 bg-indigo-50 text-indigo-700 text-sm font-medium">
-                <svg className="animate-spin h-4 w-4 text-indigo-500 flex-shrink-0" fill="none" viewBox="0 0 24 24">
+              <div className="flex items-center gap-3 mb-4 px-4 py-3 rounded-xl border border-brand-200 bg-brand-50 text-brand-700 text-sm font-medium">
+                <svg className="animate-spin h-4 w-4 text-brand-500 flex-shrink-0" fill="none" viewBox="0 0 24 24">
                   <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
                   <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z"/>
                 </svg>
@@ -1272,58 +1325,58 @@ function Header({ onLogout }) {
               ) : filteredRepos.length === 0 ? (
                 repos.length === 0 ? (
                   <div className="flex flex-col items-center py-10 px-4 text-center gap-5">
-                    <div className="w-16 h-16 rounded-2xl bg-indigo-50 flex items-center justify-center">
-                      <svg className="w-8 h-8 text-indigo-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="1.5">
+                    <div className="w-16 h-16 rounded-2xl bg-brand-50 flex items-center justify-center">
+                      <svg className="w-8 h-8 text-brand-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="1.5">
                         <path strokeLinecap="round" strokeLinejoin="round" d="M13.5 6H5.25A2.25 2.25 0 003 8.25v10.5A2.25 2.25 0 005.25 21h10.5A2.25 2.25 0 0018 18.75V10.5m-10.5 6L21 3m0 0h-5.25M21 3v5.25" />
                       </svg>
                     </div>
                     <div>
-                      <p className="font-bold text-gray-800 text-base mb-1">No repositories found</p>
-                      <p className="text-sm text-gray-400 max-w-xs">
+                      <p className="font-bold text-text-body text-base mb-1">No repositories found</p>
+                      <p className="text-sm text-text-subtle max-w-xs">
                         Your connected GitHub account doesn't have any public repositories yet.
                       </p>
                     </div>
-                    <div className="flex flex-col gap-2.5 text-xs text-left bg-gray-50 rounded-xl p-4 w-full max-w-xs border border-gray-100">
-                      <p className="text-xs font-semibold text-gray-500 mb-1">Once you have repos, here's how it works:</p>
+                    <div className="flex flex-col gap-2.5 text-xs text-left bg-surface-subtle rounded-xl p-4 w-full max-w-xs border border-line-subtle">
+                      <p className="text-xs font-semibold text-text-muted mb-1">Once you have repos, here's how it works:</p>
                       {[
                         'Select repos using the checkboxes',
                         'Click Import — AI analysis runs automatically',
                         'Switch to Portfolio tab to build your profile',
                       ].map((text, i) => (
                         <div key={i} className="flex items-start gap-2.5">
-                          <span className="w-5 h-5 rounded-full bg-indigo-100 text-indigo-600 flex items-center justify-center font-bold text-xs flex-shrink-0 mt-0.5">{i + 1}</span>
-                          <span className="text-gray-500">{text}</span>
+                          <span className="w-5 h-5 rounded-full bg-brand-100 text-brand-600 flex items-center justify-center font-bold text-xs flex-shrink-0 mt-0.5">{i + 1}</span>
+                          <span className="text-text-muted">{text}</span>
                         </div>
                       ))}
                     </div>
                   </div>
                 ) : selectedAccounts.size > 0 && !searchQuery.trim() ? (
                   <div className="flex flex-col items-center py-12 text-center">
-                    <div className="w-12 h-12 rounded-full bg-gray-100 flex items-center justify-center mb-3">
-                      <svg className="w-5 h-5 text-gray-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+                    <div className="w-12 h-12 rounded-full bg-surface-sunken flex items-center justify-center mb-3">
+                      <svg className="w-5 h-5 text-text-subtle" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
                         <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 6a3.75 3.75 0 11-7.5 0 3.75 3.75 0 017.5 0zM4.501 20.118a7.5 7.5 0 0114.998 0A17.933 17.933 0 0112 21.75c-2.676 0-5.216-.584-7.499-1.632z" />
                       </svg>
                     </div>
-                    <p className="font-semibold text-gray-700 mb-1">No repositories for this account</p>
+                    <p className="font-semibold text-text-body mb-1">No repositories for this account</p>
                     <button
                       onClick={() => { setSelectedAccounts(new Set()); setCurrentPage(1) }}
-                      className="mt-3 text-xs font-semibold text-indigo-500 hover:text-indigo-600"
+                      className="mt-3 text-xs font-semibold text-brand-500 hover:text-brand-600"
                     >
                       Show all accounts
                     </button>
                   </div>
                 ) : (
                   <div className="flex flex-col items-center py-12 text-center">
-                    <div className="w-12 h-12 rounded-full bg-gray-100 flex items-center justify-center mb-3">
-                      <svg className="w-5 h-5 text-gray-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+                    <div className="w-12 h-12 rounded-full bg-surface-sunken flex items-center justify-center mb-3">
+                      <svg className="w-5 h-5 text-text-subtle" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
                         <path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 15.803 7.5 7.5 0 0015.803 15.803z" />
                       </svg>
                     </div>
-                    <p className="font-semibold text-gray-700 mb-1">No results for "{searchQuery}"</p>
-                    <p className="text-sm text-gray-400">Try a different name or description keyword.</p>
+                    <p className="font-semibold text-text-body mb-1">No results for "{searchQuery}"</p>
+                    <p className="text-sm text-text-subtle">Try a different name or description keyword.</p>
                     <button
                       onClick={() => { setSearchQuery(''); setCurrentPage(1) }}
-                      className="mt-3 text-xs font-semibold text-indigo-500 hover:text-indigo-600"
+                      className="mt-3 text-xs font-semibold text-brand-500 hover:text-brand-600"
                     >
                       Clear search
                     </button>
@@ -1342,10 +1395,10 @@ function Header({ onLogout }) {
                       key={repo.fullName}
                       className={`flex items-center justify-between p-4 rounded-xl border transition-all ${
                         isImported
-                          ? 'border-gray-100 bg-gray-50/50 cursor-default'
+                          ? 'border-line-subtle bg-surface-subtle/50 cursor-default'
                           : isChecked
-                          ? 'border-indigo-300 bg-indigo-50/50 shadow-md shadow-indigo-100/50 cursor-pointer'
-                          : 'border-gray-200 bg-white hover:border-indigo-200 hover:shadow-md hover:shadow-gray-100 cursor-pointer'
+                          ? 'border-brand-300 bg-brand-50/50 shadow-md shadow-brand-100/50 cursor-pointer'
+                          : 'border-line-subtle bg-white hover:border-brand-200 hover:shadow-md hover:shadow-neutral-100 cursor-pointer'
                       }`}
                       onClick={() => toggleSelect(repo.fullName)}
                     >
@@ -1356,7 +1409,7 @@ function Header({ onLogout }) {
                           disabled={isImported}
                           onChange={() => toggleSelect(repo.fullName)}
                           onClick={e => e.stopPropagation()}
-                          className="w-4 h-4 accent-indigo-600 flex-shrink-0 disabled:opacity-30"
+                          className="w-4 h-4 accent-brand-600 flex-shrink-0 disabled:opacity-30"
                         />
 
                         {/* Language icon */}
@@ -1377,7 +1430,7 @@ function Header({ onLogout }) {
                         <div className="flex-1 min-w-0">
                           {/* Row 1: name + badges */}
                           <div className="flex items-center gap-2 flex-wrap">
-                            <p className={`font-semibold text-sm leading-tight ${isImported ? 'text-gray-400' : 'text-gray-900'}`}>
+                            <p className={`font-semibold text-sm leading-tight ${isImported ? 'text-text-subtle' : 'text-text-strong'}`}>
                               {repo.name}
                             </p>
                             {isImported && (
@@ -1388,7 +1441,7 @@ function Header({ onLogout }) {
                             {isImported && analyzingFullNames.has(repo.fullName) && (
                               <button
                                 onClick={e => { e.stopPropagation(); handleTabSwitch('portfolio') }}
-                                className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-blue-50 text-blue-600 text-xs font-semibold border border-blue-100 whitespace-nowrap hover:bg-blue-100 transition cursor-pointer"
+                                className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-berry-50 text-berry-600 text-xs font-semibold border border-berry-100 whitespace-nowrap hover:bg-berry-100 transition cursor-pointer"
                               >
                                 ⏳ Analyzing…
                               </button>
@@ -1397,7 +1450,7 @@ function Header({ onLogout }) {
 
                           {/* Description */}
                           {repo.description && (
-                            <p className="text-xs text-gray-400 mt-1 truncate max-w-xl">{repo.description}</p>
+                            <p className="text-xs text-text-subtle mt-1 truncate max-w-xl">{repo.description}</p>
                           )}
 
                           {/* Meta row */}
@@ -1415,15 +1468,15 @@ function Header({ onLogout }) {
                               </span>
                             )}
                             <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${
-                              repo.private ? 'bg-gray-100 text-gray-400' : 'bg-sky-50 text-sky-500'
+                              repo.private ? 'bg-surface-sunken text-text-subtle' : 'bg-sky-50 text-sky-500'
                             }`}>
                               {repo.private ? '🔒 Private' : '🌐 Public'}
                             </span>
-                            <span className="text-gray-200">·</span>
-                            <span className="text-xs text-gray-400">@{owner}</span>
-                            {updated && <><span className="text-gray-200">·</span><span className="text-xs text-gray-400">{updated}</span></>}
+                            <span className="text-neutral-200">·</span>
+                            <span className="text-xs text-text-subtle">@{owner}</span>
+                            {updated && <><span className="text-neutral-200">·</span><span className="text-xs text-text-subtle">{updated}</span></>}
                             {topics.length > 0 && topics.slice(0, 2).map(tag => (
-                              <span key={tag} className="px-2 py-0.5 rounded-full bg-gray-100 text-gray-500 text-xs hidden sm:inline">
+                              <span key={tag} className="px-2 py-0.5 rounded-full bg-surface-sunken text-text-muted text-xs hidden sm:inline">
                                 {tag}
                               </span>
                             ))}
@@ -1438,7 +1491,7 @@ function Header({ onLogout }) {
                           target="_blank"
                           rel="noopener noreferrer"
                           onClick={e => e.stopPropagation()}
-                          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-gray-200 text-xs text-gray-500 hover:text-indigo-600 hover:border-indigo-200 hover:bg-indigo-50 bg-white transition-all font-medium"
+                          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-line-subtle text-xs text-text-muted hover:text-brand-600 hover:border-brand-200 hover:bg-brand-50 bg-white transition-all font-medium"
                         >
                           <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor">
                             <path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0 0 24 12c0-6.63-5.37-12-12-12z" />
@@ -1454,15 +1507,15 @@ function Header({ onLogout }) {
 
             {/* PAGINATION */}
             {!loading && filteredRepos.length > PAGE_SIZE && (
-              <div className="flex items-center justify-between mt-6 pt-4 border-t border-gray-100">
-                <p className="text-sm text-gray-500">
+              <div className="flex items-center justify-between mt-6 pt-4 border-t border-line-subtle">
+                <p className="text-sm text-text-muted">
                   {startIdx + 1}–{Math.min(startIdx + PAGE_SIZE, filteredRepos.length)} of {filteredRepos.length} repositories
                 </p>
                 <div className="flex items-center gap-1">
                   <button
                     onClick={() => setCurrentPage(p => Math.max(1, p - 1))}
                     disabled={currentPage === 1}
-                    className="w-8 h-8 rounded-lg border border-gray-200 flex items-center justify-center text-gray-500 hover:bg-gray-50 disabled:opacity-30 disabled:cursor-not-allowed transition text-sm"
+                    className="w-8 h-8 rounded-lg border border-line-subtle flex items-center justify-center text-text-muted hover:bg-surface-subtle disabled:opacity-30 disabled:cursor-not-allowed transition text-sm"
                   >‹</button>
                   {Array.from({ length: totalPages }, (_, i) => i + 1).map(page => (
                     <button
@@ -1470,27 +1523,27 @@ function Header({ onLogout }) {
                       onClick={() => setCurrentPage(page)}
                       className={`w-8 h-8 rounded-lg border flex items-center justify-center text-sm font-medium transition ${
                         page === currentPage
-                          ? 'bg-indigo-600 border-indigo-600 text-white'
-                          : 'border-gray-200 text-gray-600 hover:bg-gray-50'
+                          ? 'bg-brand-600 border-brand-600 text-white'
+                          : 'border-line-subtle text-text-muted hover:bg-surface-subtle'
                       }`}
                     >{page}</button>
                   ))}
                   <button
                     onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))}
                     disabled={currentPage === totalPages}
-                    className="w-8 h-8 rounded-lg border border-gray-200 flex items-center justify-center text-gray-500 hover:bg-gray-50 disabled:opacity-30 disabled:cursor-not-allowed transition text-sm"
+                    className="w-8 h-8 rounded-lg border border-line-subtle flex items-center justify-center text-text-muted hover:bg-surface-subtle disabled:opacity-30 disabled:cursor-not-allowed transition text-sm"
                   >›</button>
                 </div>
               </div>
             )}
           {/* Sticky import bar — appears when repos are selected */}
           {activeTab === 'browse' && selected.size > 0 && (
-            <div className="sticky bottom-0 left-0 right-0 mt-4 -mx-6 -mb-6 px-6 py-4 bg-white/95 backdrop-blur border-t border-gray-100 rounded-b-2xl flex items-center justify-between shadow-xl shadow-gray-200/60">
+            <div className="sticky bottom-0 left-0 right-0 mt-4 -mx-6 -mb-6 px-6 py-4 bg-white/95 backdrop-blur border-t border-line-subtle rounded-b-2xl flex items-center justify-between shadow-xl shadow-neutral-200/60">
               <div>
-                <span className="text-sm font-semibold text-gray-800">
+                <span className="text-sm font-semibold text-text-body">
                   {selected.size} {selected.size === 1 ? 'repository' : 'repositories'} selected
                 </span>
-                <p className="text-xs text-gray-400 mt-0.5">AI analysis starts automatically after import</p>
+                <p className="text-xs text-text-subtle mt-0.5">AI analysis starts automatically after import</p>
               </div>
               <button
                 onClick={handleImport}

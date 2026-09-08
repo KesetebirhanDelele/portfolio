@@ -1,5 +1,9 @@
 import { useEffect, useState } from 'react'
 import { authFetch, BASE_URL } from './api'
+import { Button } from './components/ui/Button'
+import { Card } from './components/ui/Card'
+import { Badge } from './components/ui/Badge'
+import { Avatar } from './components/ui/Avatar'
 
 const ERROR_MESSAGES = {
   already_connected:    'This GitHub account is already connected to your profile.',
@@ -83,20 +87,20 @@ function Settings({ onLogout }) {
   }
 
   return (
-    <div className="min-h-screen bg-gray-50 p-4">
+    <div className="min-h-screen bg-surface-subtle p-4">
 
       {/* NAVBAR */}
-      <div className="flex items-center justify-between px-6 py-3 bg-white border border-gray-200 rounded-3xl shadow-sm mb-4">
+      <div className="flex items-center justify-between px-6 py-3 bg-white border border-line-subtle rounded-3xl shadow-sm mb-4">
         <div className="flex items-center gap-3">
-          <div className="w-10 h-10 rounded-xl bg-indigo-600 flex items-center justify-center text-white font-bold text-lg shadow-md">R</div>
+          <div className="w-10 h-10 rounded-xl bg-brand-600 flex items-center justify-center text-white font-bold text-lg shadow-md">R</div>
           <h1 className="text-xl font-bold tracking-tight">
-            <span className="text-gray-900">Repo2</span>
-            <span className="text-indigo-600">Reputation</span>
+            <span className="text-text-strong">Repo2</span>
+            <span className="text-brand-600">Reputation</span>
           </h1>
         </div>
         <div className="flex items-center gap-3">
-          <a href="/" className="text-sm font-medium text-gray-600 hover:text-indigo-600 transition">← Back to repos</a>
-          <button onClick={onLogout} className="px-5 py-2 rounded-full border border-gray-200 bg-white hover:bg-gray-50 transition font-semibold text-sm">Logout</button>
+          <a href="/" className="text-sm font-medium text-text-muted hover:text-brand-600 transition">← Back to repos</a>
+          <Button variant="outline" size="sm" onClick={onLogout}>Logout</Button>
         </div>
       </div>
 
@@ -117,31 +121,28 @@ function Settings({ onLogout }) {
         )}
 
         {/* ── Login account ────────────────────────────────────────── */}
-        <div className="bg-white border border-gray-200 rounded-2xl p-6 shadow-sm">
-          <h2 className="text-base font-bold text-gray-900 mb-1">Login Account</h2>
-          <p className="text-xs text-gray-500 mb-4">The GitHub account you signed in with.</p>
+        <Card padded>
+          <h2 className="text-base font-bold text-text-strong mb-1">Login Account</h2>
+          <p className="text-xs text-text-muted mb-4">The GitHub account you signed in with.</p>
 
           {loading ? (
-            <p className="text-gray-400 text-sm py-2">Loading…</p>
+            <p className="text-text-subtle text-sm py-2">Loading…</p>
           ) : accounts.filter(a => a.is_primary).map(account => (
-            <div key={account.id} className="flex items-center gap-3 p-4 rounded-xl border border-gray-200 bg-gray-50">
-              {account.avatar_url
-                ? <img src={account.avatar_url} alt={account.github_username} className="w-9 h-9 rounded-full flex-shrink-0" />
-                : <div className="w-9 h-9 rounded-full bg-indigo-100 flex items-center justify-center text-indigo-600 font-bold text-sm flex-shrink-0">{account.github_username[0].toUpperCase()}</div>
-              }
+            <div key={account.id} className="flex items-center gap-3 p-4 rounded-xl border border-line-subtle bg-surface-subtle">
+              <Avatar src={account.avatar_url} name={account.github_username} size="sm" />
               <div>
-                <p className="font-semibold text-gray-900 text-sm">@{account.github_username}</p>
-                {account.github_email && <p className="text-xs text-gray-400">{account.github_email}</p>}
+                <p className="font-semibold text-text-strong text-sm">@{account.github_username}</p>
+                {account.github_email && <p className="text-xs text-text-subtle">{account.github_email}</p>}
               </div>
-              <span className="ml-2 px-2 py-0.5 rounded-full bg-indigo-100 text-indigo-700 text-xs font-semibold">Primary</span>
+              <Badge tone="red" className="ml-2">Primary</Badge>
             </div>
           ))}
-        </div>
+        </Card>
 
         {/* ── GitHub App installations ─────────────────────────────── */}
-        <div className="bg-white border border-gray-200 rounded-2xl p-6 shadow-sm">
-          <h2 className="text-base font-bold text-gray-900 mb-1">Additional GitHub Accounts</h2>
-          <p className="text-xs text-gray-500 mb-5">
+        <Card padded>
+          <h2 className="text-base font-bold text-text-strong mb-1">Additional GitHub Accounts</h2>
+          <p className="text-xs text-text-muted mb-5">
             Install the GitHub App on any account (personal or org) to access its repos — public and private — without OAuth session conflicts.
           </p>
 
@@ -156,7 +157,7 @@ function Settings({ onLogout }) {
                       : <div className="w-9 h-9 rounded-full bg-green-200 flex items-center justify-center text-green-700 font-bold text-sm flex-shrink-0">{inst.account_login[0].toUpperCase()}</div>
                     }
                     <div>
-                      <p className="font-semibold text-gray-900 text-sm">@{inst.account_login}</p>
+                      <p className="font-semibold text-text-strong text-sm">@{inst.account_login}</p>
                       <p className="text-xs text-green-600 font-medium">GitHub App · Public + Private repos</p>
                     </div>
                   </div>
@@ -174,16 +175,16 @@ function Settings({ onLogout }) {
           {/* Install button */}
           <button
             onClick={handleInstall}
-            className="flex items-center gap-2.5 px-5 py-3 rounded-xl bg-gray-900 hover:bg-gray-800 text-white text-sm font-semibold transition"
+            className="flex items-center gap-2.5 px-5 py-3 rounded-xl bg-neutral-900 hover:bg-neutral-800 text-white text-sm font-semibold transition"
           >
             <GithubIcon />
             Install GitHub App on Another Account
           </button>
-          <p className="mt-3 text-xs text-gray-400">
+          <p className="mt-3 text-xs text-text-subtle">
             You'll be taken to GitHub to choose which account and which repositories to grant access to.
             Works for personal accounts and organizations.
           </p>
-        </div>
+        </Card>
 
       </div>
     </div>

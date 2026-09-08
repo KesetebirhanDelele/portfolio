@@ -8,7 +8,7 @@ const { generatePortfolioNarrative, extractLinkedInProfile, generateProjectDescr
 const { generatePortfolioPdf } = require('../services/pdfGenerator');
 const { registerHeavyTaskHandler, runHeavyTask } = require('../services/heavyTaskQueue');
 const { TECH_CATEGORIES, TECH_LABELS } = require('../services/techMaps');
-const { publishPortfolioAsGithubRepo } = require('../services/githubPortfolioPublisher');
+const { publishPortfolioAsGithubRepo, assignProjectFolders } = require('../services/githubPortfolioPublisher');
 const { getGithubInfo } = require('../services/githubTokenResolver');
 const { getResumeData, saveResumeData, deleteResumeData } = require('../services/resumeDataResolver');
 
@@ -32,6 +32,17 @@ async function extractPdfText(buffer) {
     pages.push(content.items.map(item => item.str).join(' '));
   }
   return pages.join('\n');
+}
+
+// Word count excludes tech-stack names by construction, not by parsing —
+// technologies are a separate field (repo.analysis.technologies /
+// caseStudy.tools) never embedded in this description string, so a plain
+// whitespace word count is already counting prose only.
+function truncateWords(text, maxWords) {
+  if (!text) return text;
+  const words = text.trim().split(/\s+/);
+  if (words.length <= maxWords) return text;
+  return words.slice(0, maxWords).join(' ') + '…';
 }
 
 function generateSlug(title) {
@@ -229,7 +240,7 @@ router.get('/public/:slug', async (req, res) => {
     const repositoryIds = portfolio.content_json?.repository_ids || [];
 
     const reposResult = await pool.query(
-      `SELECT r.id AS repo_id, r.name, r.full_name, r.description,
+      `SELECT r.id AS repo_id, r.name, r.full_name, r.provider, r.description,
               r.primary_language, r.stars_count, r.forks_count, r.topics, r.image_url,
               a.confidence_score, a.skills_json, a.summary_json,
               da.code_intelligence_json
@@ -255,6 +266,7 @@ router.get('/public/:slug', async (req, res) => {
     const repos = reposResult.rows.map(r => ({
       name:        r.name,
       fullName:    r.full_name,
+      provider:    r.provider,
       description: r.description,
       language:    r.primary_language,
       stars:       r.stars_count,
@@ -269,6 +281,12 @@ router.get('/public/:slug', async (req, res) => {
         summary:         r.summary_json?.text,
         whatItDoes:      r.summary_json?.what_it_does,
         highlights:      r.summary_json?.highlights,
+        // Consumed by PublicPortfolio.jsx's ProjectCard alongside
+        // highlights.purpose/use_cases for the expanded "Highlights" bullet
+        // list — same three fields pdfGenerator.js's basic-pipeline bullet
+        // fallback uses, kept in sync so the PDF and live page match. See
+        // PROGRESS.md M103/M104.
+        keyTakeaways:    r.summary_json?.key_takeaways,
         confidenceLabel: r.summary_json?.confidence_label,
       } : null,
     }));
@@ -276,6 +294,26 @@ router.get('/public/:slug', async (req, res) => {
     const narrative = portfolio.content_json?.narrative || {};
     const profile   = portfolio.content_json?.profile   || {};
     const linkedin  = await getResumeData(portfolio.user_id);
+
+    // If this portfolio has been pushed to GitHub (content_json.github_publish,
+    // set by POST /:id/publish-github-repo), attach each project's real
+    // per-project README URL — reuses the exact same folder-naming logic
+    // publishPortfolioAsGithubRepo used when it wrote those files, so the
+    // link is guaranteed to point at a real path rather than a guessed one.
+    // This is what lets the live page offer "View Full Project" for
+    // Colaberry-sourced projects, which never had a real GitHub source repo
+    // to link to in the first place. See PROGRESS.md M93.
+    const githubPublish = portfolio.content_json?.github_publish || null;
+    const assignedFolders = githubPublish ? assignProjectFolders(narrative.projects || []) : [];
+    const projectsWithGithubUrl = (narrative.projects || []).map(p => {
+      if (!githubPublish) return p;
+      const match = assignedFolders.find(a => a.project.repoName === p.repoName);
+      if (!match) return p;
+      return {
+        ...p,
+        githubProjectUrl: `https://github.com/${githubPublish.owner}/${githubPublish.repoName}/blob/main/${match.folder}/README.md`,
+      };
+    });
 
     return res.status(200).json({
       success: true,
@@ -285,8 +323,7 @@ router.get('/public/:slug', async (req, res) => {
         headline:             narrative.headline             || null,
         narrative:            narrative.narrative            || null,
         topSkills:            narrative.top_skills           || [],
-        projects:             narrative.projects             || [],
-        engineeringStrengths: narrative.engineering_strengths || [],
+        projects:             projectsWithGithubUrl,
         careerSignals:        narrative.career_signals        || [],
         profile,
         linkedin,
@@ -346,7 +383,7 @@ router.get('/public/:slug/pdf', heavyOperationLimiter, async (req, res) => {
     const repositoryIds = portfolio.content_json?.repository_ids || [];
 
     const reposResult = await pool.query(
-      `SELECT r.id AS repo_id, r.name, r.full_name, r.primary_language,
+      `SELECT r.id AS repo_id, r.name, r.full_name, r.primary_language, r.provider,
               a.skills_json, a.summary_json,
               da.intelligence_json, da.inference_json, da.code_intelligence_json
        FROM repositories r
@@ -369,7 +406,13 @@ router.get('/public/:slug/pdf', heavyOperationLimiter, async (req, res) => {
     const narrative      = portfolio.content_json?.narrative || {};
     const profile        = portfolio.content_json?.profile   || {};
     const linkedin       = (await getResumeData(portfolio.user_id)) || {};
-    const githubUsername = reposResult.rows.find(r => r.full_name)?.full_name?.split('/')?.[0] || null;
+    // Only a real GitHub repo's full_name is a genuine "owner/repo" path — a
+    // Colaberry project's full_name duplicates its scraped title instead
+    // (no real owner), which previously leaked through as a garbage
+    // "github.com/<project title>" link. Same fix already applied to the
+    // public portfolio page's own derivation (M92); this PDF route had its
+    // own separate copy of the same bug. See PROGRESS.md M100.
+    const githubUsername = reposResult.rows.find(r => r.provider === 'github' && r.full_name)?.full_name?.split('/')?.[0] || null;
 
     const repos = reposResult.rows.map(r => ({
       name:            r.name,
@@ -380,6 +423,13 @@ router.get('/public/:slug/pdf', heavyOperationLimiter, async (req, res) => {
         whatItDoes:   r.summary_json?.what_it_does,
         summary:      r.summary_json?.text,
         strengths:    r.summary_json?.highlights?.strengths,
+        // purpose/useCases/keyTakeaways: only consumed by pdfGenerator.js's
+        // basic-pipeline bullet fallback (see its comment) for repos with no
+        // deep-analysis intelligence at all — e.g. Colaberry projects, which
+        // never get a deep_analyses row since they aren't source code.
+        purpose:      r.summary_json?.highlights?.purpose,
+        useCases:     r.summary_json?.highlights?.use_cases,
+        keyTakeaways: r.summary_json?.key_takeaways,
       } : null,
       intelligence:     r.intelligence_json    || null,
       inference:        r.inference_json       || null,
@@ -406,6 +456,7 @@ router.get('/public/:slug/pdf', heavyOperationLimiter, async (req, res) => {
       education:      linkedin.education   || [],
       certifications: linkedin.certifications || [],
       resumeSummary:  linkedin.summary || null,
+      resumeHeadline: linkedin.headline || null,
     }, { timeoutMs: 60 * 1000 });
     const pdfBuffer = Buffer.from(pdfBase64, 'base64');
 
@@ -851,7 +902,9 @@ router.post('/:id/publish-github-repo', authMiddleware, generationLimiter, async
       });
     }
 
-    const resumeSummary = (await getResumeData(userId))?.summary || null;
+    const resumeDataForPublish = await getResumeData(userId);
+    const resumeSummary  = resumeDataForPublish?.summary  || null;
+    const resumeHeadline = resumeDataForPublish?.headline || null;
 
     // Resolve each project's uploaded media (repo_media, keyed by repo id) to
     // a repoName -> imageUrl map so the README can show real project images,
@@ -936,8 +989,19 @@ router.post('/:id/publish-github-repo', authMiddleware, generationLimiter, async
     }
 
     const { repoUrl, created, projectsSynced, projectsRemoved } = await publishPortfolioAsGithubRepo({
-      token, owner, repoName, narrative, profile, resumeSummary, projectImages, caseStudies,
+      token, owner, repoName, narrative, profile, resumeSummary, resumeHeadline, projectImages, caseStudies,
     });
+
+    // Previously only returned once in this response and never persisted —
+    // the live public portfolio page (a separate, later request) had no way
+    // to know a GitHub repo existed at all, so it could never link to it.
+    // Stored here so GET /public/:slug can build per-project "View Full
+    // Project" links (see below) any time after this publish, not just in
+    // the moment right after clicking the button. See PROGRESS.md M93.
+    await pool.query(
+      `UPDATE portfolios SET content_json = jsonb_set(content_json, '{github_publish}', $1::jsonb), updated_at = NOW() WHERE id = $2`,
+      [JSON.stringify({ owner, repoName }), id]
+    );
 
     return res.status(200).json({ success: true, data: { repoUrl, created, projectsSynced, projectsRemoved } });
   } catch (err) {
@@ -1014,7 +1078,14 @@ router.post('/:id/generate-project-descriptions', authMiddleware, generationLimi
         console.error(`[generate-project-descriptions] ${r.name}:`, err.message);
       }
 
-      return { ...existing, description };
+      // Hard safety net behind the prompt's own 100-word instruction — models
+      // don't always obey a word count exactly. Truncated once here, at the
+      // single point every consumer (public portfolio page, GitHub-published
+      // README, the per-project README) reads content_json.narrative.projects
+      // from — so all three are guaranteed to show the same capped text
+      // rather than each needing its own truncation logic. The full
+      // "View Details"/case-study content elsewhere is unaffected.
+      return { ...existing, description: truncateWords(description, 100) };
     }));
 
     const updatedNarrative = {

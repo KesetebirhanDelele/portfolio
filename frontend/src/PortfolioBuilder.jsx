@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useMemo } from 'react'
 import { authFetch, BASE_URL } from './api'
 import { githubToRaw, isSupportedMediaUrl } from './utils/mediaUrl'
 import { PortfolioBuilderSkeleton } from './Skeleton'
+import { Button } from './components/ui/Button'
 
 const POLL_MS = 3000
 
@@ -133,9 +134,12 @@ const PREV_CATS = {
   Other:    { bg: '#f3f4f6', color: '#374151' },
 }
 
-function MiniPreview({ headline, narrative, topSkills, projects, repos, analysisMap, profile, engineeringStrengths, linkedin }) {
+function MiniPreview({ headline, narrative, topSkills, projects, repos, analysisMap, profile, linkedin }) {
   const displayName = profile?.fullName || 'Your Portfolio'
-  const displayHeadline = profile?.headline || headline
+  // Resume's own headline wins over the AI-generated one when present — same
+  // resume-priority rule as the About Me block below and every published
+  // channel (public page, GitHub README, PDF export). See PROGRESS.md M99.
+  const displayHeadline = profile?.headline || linkedin?.headline?.trim() || headline
   const initials = displayName.split(' ').slice(0, 2).map(w => w[0]).join('').toUpperCase()
 
   const aiRepoCount = repos.filter(r =>
@@ -209,34 +213,24 @@ function MiniPreview({ headline, narrative, topSkills, projects, repos, analysis
         </div>
       </div>
 
-      {/* About Me */}
-      {narrative && (
-        <div style={{ padding: '14px 20px', borderBottom: '1px solid #e5e7eb' }}>
-          <h3 style={{ margin: '0 0 7px', fontSize: '10px', fontWeight: '700', color: '#0f172a', textTransform: 'uppercase', letterSpacing: '1.5px' }}>
-            About Me
-          </h3>
-          <p style={{ margin: 0, fontSize: '11px', color: '#475569', lineHeight: 1.65,
-            overflow: 'hidden', display: '-webkit-box', WebkitLineClamp: 3, WebkitBoxOrient: 'vertical' }}>
-            {narrative}
-          </p>
-        </div>
-      )}
-
-      {/* Engineering Strengths */}
-      {engineeringStrengths?.length > 0 && (
-        <div style={{ padding: '14px 20px', borderBottom: '1px solid #e5e7eb' }}>
-          <h3 style={{ margin: '0 0 9px', fontSize: '10px', fontWeight: '700', color: '#0f172a', textTransform: 'uppercase', letterSpacing: '1.5px' }}>
-            Engineering Strengths
-          </h3>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
-            {engineeringStrengths.slice(0, 6).map((s, i) => (
-              <div key={i} style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '11px', color: '#166534' }}>
-                <span style={{ fontWeight: '700', flexShrink: 0 }}>✓</span>{s}
-              </div>
-            ))}
+      {/* About Me — resume summary replaces the AI narrative when a resume
+          is on file, not shown alongside it, matching the exact rule the
+          public portfolio page and the GitHub-published README both apply
+          to the same underlying fields. See PROGRESS.md M92. */}
+      {(() => {
+        const effectiveSummary = linkedin?.summary?.trim() || narrative
+        return effectiveSummary && (
+          <div style={{ padding: '14px 20px', borderBottom: '1px solid #e5e7eb' }}>
+            <h3 style={{ margin: '0 0 7px', fontSize: '10px', fontWeight: '700', color: '#0f172a', textTransform: 'uppercase', letterSpacing: '1.5px' }}>
+              About Me
+            </h3>
+            <p style={{ margin: 0, fontSize: '11px', color: '#475569', lineHeight: 1.65,
+              overflow: 'hidden', display: '-webkit-box', WebkitLineClamp: 3, WebkitBoxOrient: 'vertical' }}>
+              {effectiveSummary}
+            </p>
           </div>
-        </div>
-      )}
+        )
+      })()}
 
       {/* Core Technologies */}
       {topSkills.length > 0 && (
@@ -484,9 +478,82 @@ function PortfolioBuilder({ onLogout, onGoToBrowse, onRepoDeleted, onRepoAnalyze
   const autoStartedRef = useRef(false)
   const autoSelectedIdsRef = useRef(new Set())
 
+  // Set when an existing portfolio is found on mount and awaiting the
+  // user's explicit choice (see below) — { portfolioId, title, updatedAt }.
+  const [existingPortfolioPrompt, setExistingPortfolioPrompt] = useState(null)
+  const [checkingExistingPortfolio, setCheckingExistingPortfolio] = useState(true)
+
   useEffect(() => {
     loadRepos()
   }, [])
+
+  // Check for an existing portfolio on mount, but — unlike the original
+  // M92 fix — don't silently auto-load it. M92 fixed a real bug (every
+  // page load unconditionally created a brand-new portfolio, orphaning
+  // whatever draft existed before — see git history), but auto-loading
+  // the most recent one unconditionally traded that bug for a different
+  // problem: the user can no longer get back to the repo-selection
+  // checklist to change their mind about which projects/repos to combine
+  // without an existing portfolio hijacking every visit. This now asks
+  // instead of deciding either way — see chooseExistingPortfolio /
+  // chooseStartFresh below and the choice-screen render further down.
+  //
+  // autoStartedRef is set true immediately (before the async fetch below
+  // resolves) so the auto-start effect can't race ahead and create a
+  // duplicate while this check — or the user's choice — is still pending.
+  // Reset to false only once we know for certain no choice is needed (no
+  // existing portfolio) or the user explicitly picked "start fresh".
+  const existingPortfolioCheckedRef = useRef(false)
+  useEffect(() => {
+    if (existingPortfolioCheckedRef.current) return
+    existingPortfolioCheckedRef.current = true
+    autoStartedRef.current = true
+    ;(async () => {
+      const res = await authFetch(`${BASE_URL}/api/portfolios`, {}, onLogout)
+      const json = res ? await res.json() : null
+      if (!json?.success || !json.data?.length) {
+        autoStartedRef.current = false // no existing portfolio — let auto-start create one
+        setCheckingExistingPortfolio(false)
+        return
+      }
+      // Most recent first — backend orders by updated_at DESC. Only the
+      // summary needed for the prompt — full hydration happens in
+      // chooseExistingPortfolio, only if the user actually picks it.
+      const summary = json.data[0]
+      setExistingPortfolioPrompt({
+        portfolioId: summary.portfolioId,
+        title: summary.title || 'My Portfolio',
+        updatedAt: summary.updatedAt,
+        repositoryCount: summary.repositoryCount || 0,
+        narrativeStatus: summary.narrativeStatus,
+      })
+      setCheckingExistingPortfolio(false)
+    })()
+  }, [])
+
+  async function chooseExistingPortfolio() {
+    if (!existingPortfolioPrompt) return
+    const saved = await loadFullPortfolio(existingPortfolioPrompt.portfolioId)
+    setExistingPortfolioPrompt(null)
+    if (saved?.narrativeStatus === 'generating') {
+      // A previous session's generation never got polled to completion
+      // (tab closed mid-generation). Re-triggering is simplistic — a
+      // fresh generate-narrative call, not literally resuming the same
+      // in-flight one — but harmless: narrative generation is a single
+      // fast call, and this only fires for that rare interrupted window.
+      handleGenerateNarrative(saved)
+    }
+  }
+
+  function chooseStartFresh() {
+    setExistingPortfolioPrompt(null)
+    // Let auto-start run if this visit came from a fresh auto-import
+    // (autoStart prop true) — same as the original first-time-user path.
+    // For a normal returning visit (autoStart false) this just clears the
+    // way for Step 1's repo-selection checklist to render, same outcome
+    // as the pre-existing "+ Build another portfolio" reset button.
+    autoStartedRef.current = false
+  }
 
   // Stop polling when component unmounts
   useEffect(() => {
@@ -1147,13 +1214,16 @@ function PortfolioBuilder({ onLogout, onGoToBrowse, onRepoDeleted, onRepoAnalyze
     }
   }
 
-  async function handleEditPortfolio() {
-    if (!portfolio?.portfolioId) return
-    // Reload saved portfolio data so the editor has up-to-date profile + narrative
-    const res = await authFetch(`${BASE_URL}/api/portfolios/${portfolio.portfolioId}`, {}, onLogout)
-    if (!res) return
+  // Fetches a portfolio by id and hydrates every piece of editor state from
+  // it (narrative, profile, linkedin, media, selection, portfolio record
+  // itself). Shared by handleEditPortfolio (explicit "Edit" click on an
+  // already-loaded portfolio) and the mount-time load below (finding an
+  // existing portfolio before deciding whether to create a new one).
+  async function loadFullPortfolio(portfolioId) {
+    const res = await authFetch(`${BASE_URL}/api/portfolios/${portfolioId}`, {}, onLogout)
+    if (!res) return null
     const json = await res.json()
-    if (!json.success) return
+    if (!json.success) return null
 
     const saved = json.data
     if (saved.narrative) {
@@ -1179,8 +1249,25 @@ function PortfolioBuilder({ onLogout, onGoToBrowse, onRepoDeleted, onRepoAnalyze
       )
       setRepoMedia(clean)
     }
-    setPortfolio(prev => ({ ...prev, status: saved.status, visibility: saved.visibility }))
-    setNarrativeStatus('completed')
+    setTitle(saved.title || 'My Portfolio')
+    setSelected(new Set((saved.repos || []).map(r => r.repositoryId)))
+    setPortfolio({
+      portfolioId: saved.portfolioId, title: saved.title, slug: saved.slug,
+      status: saved.status, visibility: saved.visibility,
+      repositoryIds: (saved.repos || []).map(r => r.repositoryId),
+      createdAt: saved.createdAt,
+    })
+    // Real status, not hardcoded — a mount-time load (see the effect below)
+    // can land on a portfolio that never finished generating, whereas the
+    // original handleEditPortfolio call site could safely assume 'completed'
+    // because it was only ever reachable from a UI state that already implied it.
+    setNarrativeStatus(saved.narrativeStatus)
+    return saved
+  }
+
+  async function handleEditPortfolio() {
+    if (!portfolio?.portfolioId) return
+    await loadFullPortfolio(portfolio.portfolioId)
     setPublicUrl(null)   // return to Step 3 editor
   }
 
@@ -1235,6 +1322,56 @@ function PortfolioBuilder({ onLogout, onGoToBrowse, onRepoDeleted, onRepoAnalyze
   const analyzedRepos = importedRepos
     .filter(r => ['completed', 'partial'].includes(analysisMap[r.id]?.status))
     .sort((a, b) => (analysisMap[b.id]?.confidenceScore ?? 0) - (analysisMap[a.id]?.confidenceScore ?? 0))
+
+  // ── Step 0: Existing portfolio found — ask, don't decide automatically ─────
+  if (checkingExistingPortfolio) {
+    return <PortfolioBuilderSkeleton />
+  }
+  if (existingPortfolioPrompt) {
+    const updatedLabel = existingPortfolioPrompt.updatedAt
+      ? new Date(existingPortfolioPrompt.updatedAt).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })
+      : null
+    const statusLabel = existingPortfolioPrompt.narrativeStatus === 'completed'
+      ? 'narrative generated'
+      : existingPortfolioPrompt.narrativeStatus === 'generating'
+        ? 'narrative still generating'
+        : 'narrative not yet generated'
+    return (
+      <div style={{ maxWidth: '520px', margin: '40px auto', padding: '8px 0' }}>
+        <div style={{ padding: '28px', backgroundColor: '#fff', border: '1px solid #e5e7eb', borderRadius: '14px' }}>
+          <h2 style={{ margin: '0 0 8px', fontSize: '18px', fontWeight: '700', color: '#0f172a' }}>
+            You have an existing portfolio
+          </h2>
+          <p style={{ margin: '0 0 22px', fontSize: '13px', color: '#6b7280', lineHeight: 1.6 }}>
+            <strong>{existingPortfolioPrompt.title}</strong> — {existingPortfolioPrompt.repositoryCount} repo{existingPortfolioPrompt.repositoryCount === 1 ? '' : 's'}, {statusLabel}
+            {updatedLabel && <>, last updated {updatedLabel}</>}.
+          </p>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+            <button
+              onClick={chooseExistingPortfolio}
+              style={{
+                padding: '12px 18px', borderRadius: '10px', border: 'none', cursor: 'pointer',
+                fontSize: '14px', fontWeight: '700', color: '#fff',
+                background: 'linear-gradient(135deg, #4f46e5, #7c3aed)',
+              }}
+            >
+              Continue editing this portfolio →
+            </button>
+            <button
+              onClick={chooseStartFresh}
+              style={{
+                padding: '12px 18px', borderRadius: '10px',
+                border: '1px solid #d1d5db', backgroundColor: '#fff',
+                color: '#374151', fontWeight: '600', fontSize: '14px', cursor: 'pointer',
+              }}
+            >
+              Start fresh — choose different repos/projects
+            </button>
+          </div>
+        </div>
+      </div>
+    )
+  }
 
   // ── Step 4: Published ──────────────────────────────────────────────────────
   if (publicUrl) {
@@ -1943,7 +2080,6 @@ function PortfolioBuilder({ onLogout, onGoToBrowse, onRepoDeleted, onRepoAnalyze
               repos={selectedRepos}
               analysisMap={analysisMap}
               profile={profile}
-              engineeringStrengths={narrativeData.engineering_strengths || []}
               linkedin={linkedinData}
             />
           </div>
@@ -2056,7 +2192,7 @@ function PortfolioBuilder({ onLogout, onGoToBrowse, onRepoDeleted, onRepoAnalyze
       ) : loadError ? (
         <div style={{ padding: '24px 0', display: 'flex', flexDirection: 'column', gap: '12px' }}>
           <p style={{ color: '#dc2626', fontSize: '14px', margin: 0 }}>Failed to load repositories: {loadError}</p>
-          <button onClick={loadRepos} style={{ alignSelf: 'flex-start', padding: '8px 16px', borderRadius: '8px', border: '1px solid #e5e7eb', background: 'white', cursor: 'pointer', fontSize: '13px' }}>↻ Retry</button>
+          <Button variant="outline" size="sm" onClick={loadRepos} className="self-start">↻ Retry</Button>
         </div>
       ) : analyzedRepos.length === 0 ? (
         <div style={{ padding: '24px 0', display: 'flex', flexDirection: 'column', gap: '12px' }}>

@@ -12,6 +12,7 @@
 // Runs fully headless — no human interaction, no Xvfb/VNC container needed.
 // Consumes a storageState captured by the live-login flow (colaberryLiveLoginSessionManager).
 const { chromium } = require('playwright');
+const { guardBrowser, ResourceLimitExceededError } = require('./browserResourceGuard');
 
 const NAV_TIMEOUT_MS = 60000;
 const STEP_CLICK_TIMEOUT_MS = 15000;
@@ -118,8 +119,20 @@ async function isSessionValid(page, checkUrl) {
   return passwordFieldCount === 0;
 }
 
-async function scrapeSingleProject(page, projectUrl) {
-  await page.goto(projectUrl, { waitUntil: 'load', timeout: NAV_TIMEOUT_MS });
+async function scrapeSingleProject(page, projectUrl, { skipNav = false } = {}) {
+  if (skipNav) {
+    // isSessionValid already navigated this exact page to this exact URL
+    // (to check for a stale-session redirect) — a second page.goto() to the
+    // identical URL immediately afterward races the first navigation, and
+    // on this AngularJS app Chromium aborts the second one outright
+    // (net::ERR_ABORTED), not a timeout. Confirmed live: this made the
+    // first project in every import batch fail to scrape, 100% reproducible
+    // when a batch is a single project. Wait for the already-in-flight
+    // navigation to settle instead of re-triggering it.
+    await page.waitForLoadState('load', { timeout: NAV_TIMEOUT_MS }).catch(() => {});
+  } else {
+    await page.goto(projectUrl, { waitUntil: 'load', timeout: NAV_TIMEOUT_MS });
+  }
 
   const title = ((await page.locator('h1.ng-binding').first().textContent().catch(() => null)) || 'Untitled Project').trim();
   const description = ((await page.locator('p.ng-binding').first().textContent().catch(() => null)) || '').trim();
@@ -152,6 +165,10 @@ async function scrapeColaberryProjects(storageState, projectUrls) {
   // already makes for Puppeteer. The container itself is the isolation
   // boundary, and this only ever navigates to Colaberry's own domain.
   const browser = await chromium.launch({ headless: true, args: ['--no-sandbox'] });
+  // Unlike the live-login sibling containers, this browser runs in-process
+  // with no Docker memory ceiling — guardBrowser is the application-level
+  // substitute. See browserResourceGuard.js's header comment.
+  const guard = guardBrowser(browser, { label: 'colaberry-scrape' });
   const succeeded = [];
   const failed = [];
   try {
@@ -172,16 +189,24 @@ async function scrapeColaberryProjects(storageState, projectUrls) {
       throw new Error('SESSION_EXPIRED: Your Colaberry session has expired — log in again to continue.');
     }
 
-    for (const url of projectUrls) {
+    for (const [index, url] of projectUrls.entries()) {
       try {
-        succeeded.push(await scrapeSingleProject(page, url));
+        succeeded.push(await scrapeSingleProject(page, url, { skipNav: index === 0 }));
       } catch (err) {
         console.error(`[colaberry-scraper] project failed (${url}):`, err.message);
         failed.push({ url, error: err.message });
+        // The guard already force-closed the browser — every remaining URL
+        // would fail the same way against a dead page, so stop the batch
+        // now instead of collecting N more confusing generic errors.
+        if (guard.wasKilledForMemory()) break;
       }
     }
   } finally {
-    await browser.close();
+    guard.stop();
+    await browser.close().catch(() => {});
+  }
+  if (guard.wasKilledForMemory()) {
+    throw new ResourceLimitExceededError('This import used more memory than allowed and was stopped — try fewer projects at once.');
   }
   return { succeeded, failed };
 }

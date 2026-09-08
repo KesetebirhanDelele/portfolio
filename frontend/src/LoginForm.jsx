@@ -9,19 +9,20 @@ function LoginForm({ sessionMessage }) {
     <div className="min-h-screen flex">
 
       {/* LEFT PANEL */}
-      <div className="hidden lg:flex w-1/2 bg-indigo-600 flex-col justify-between p-12">
-        <div className="flex items-center gap-3">
+      <div className="hidden lg:flex w-2/5 flex-col bg-white">
+        {/* Red confined to the logo strip only — everything below is white/dark-text */}
+        <div className="flex items-center gap-3 bg-brand-700 px-12 py-6">
           <div className="w-9 h-9 bg-white rounded-xl flex items-center justify-center">
-            <span className="text-indigo-600 font-bold text-lg">R</span>
+            <span className="text-brand-600 font-bold text-lg">R</span>
           </div>
           <span className="text-white font-bold text-lg">Repo2Reputation</span>
         </div>
 
-        <div>
-          <h2 className="text-4xl font-bold text-white leading-tight mb-4">
+        <div className="flex-1 flex flex-col justify-center px-12">
+          <h2 className="text-4xl font-bold text-text-strong leading-tight mb-4">
             Turn your GitHub and Colaberry work into a reputation that speaks for you.
           </h2>
-          <p className="text-indigo-200 text-base leading-relaxed mb-8">
+          <p className="text-text-muted text-base leading-relaxed mb-8">
             We analyze your GitHub repositories and Colaberry network projects to highlight your skills, impact, and expertise.
           </p>
           <div className="space-y-4">
@@ -31,9 +32,9 @@ function LoginForm({ sessionMessage }) {
               'Import from GitHub or Colaberry’s project network',
               'Portfolio-ready reports',
             ].map(feature => (
-              <div key={feature} className="flex items-center gap-3 text-indigo-100">
-                <div className="w-5 h-5 rounded-full bg-indigo-500 flex items-center justify-center flex-shrink-0">
-                  <span className="text-white text-xs">✓</span>
+              <div key={feature} className="flex items-center gap-3 text-text-body">
+                <div className="w-5 h-5 rounded-full bg-brand-50 flex items-center justify-center flex-shrink-0">
+                  <span className="text-brand-600 text-xs">✓</span>
                 </div>
                 <span className="text-sm">{feature}</span>
               </div>
@@ -41,19 +42,19 @@ function LoginForm({ sessionMessage }) {
           </div>
         </div>
 
-        <p className="text-indigo-400 text-xs">© 2026 Repo2Reputation</p>
+        <p className="text-text-muted text-xs px-12 py-6">© 2026 Repo2Reputation</p>
       </div>
 
       {/* RIGHT PANEL */}
-      <div className="w-full lg:w-1/2 flex items-center justify-center bg-white p-8">
+      <div className="w-full lg:w-3/5 flex items-center justify-center bg-white p-8">
         <div className="max-w-sm w-full">
 
           {/* Mobile logo */}
           <div className="flex items-center gap-2 mb-6 lg:hidden">
-            <div className="w-9 h-9 bg-indigo-600 rounded-xl flex items-center justify-center">
+            <div className="w-9 h-9 bg-brand-600 rounded-xl flex items-center justify-center">
               <span className="text-white font-bold">R</span>
             </div>
-            <span className="text-indigo-600 font-bold text-lg">Repo2Reputation</span>
+            <span className="text-brand-600 font-bold text-lg">Repo2Reputation</span>
           </div>
 
           {/* Session expired banner */}
@@ -63,14 +64,14 @@ function LoginForm({ sessionMessage }) {
             </div>
           )}
 
-          <h2 className="text-3xl font-bold text-gray-900 mb-2">Welcome</h2>
-          <p className="text-gray-500 text-sm mb-4">
+          <h2 className="text-3xl font-bold text-text-strong mb-2">Welcome</h2>
+          <p className="text-text-muted text-sm mb-4">
             Analyze your GitHub repositories and Colaberry projects to generate recruiter-ready portfolios.
           </p>
 
           {/* Colaberry account requirement — set expectations before the click,
               not just as a rejection message after a failed attempt. */}
-          <div className="mb-6 px-4 py-3 rounded-xl border border-indigo-100 bg-indigo-50/60 text-indigo-700 text-xs leading-relaxed">
+          <div className="mb-6 px-4 py-3 rounded-xl border border-brand-100 bg-brand-50/60 text-brand-700 text-xs leading-relaxed">
             <span className="font-semibold">Colaberry students and staff only.</span> Sign in with the
             GitHub account that has your Colaberry email verified on it — we check for a matching
             Colaberry account before granting access.
@@ -79,7 +80,7 @@ function LoginForm({ sessionMessage }) {
           {/* GitHub OAuth button */}
           <button
             onClick={handleGitHubLogin}
-            className="w-full flex items-center justify-center gap-3 bg-gray-900 hover:bg-gray-800 text-white font-semibold py-3 rounded-xl text-sm transition"
+            className="w-full flex items-center justify-center gap-3 bg-neutral-900 hover:bg-neutral-800 text-white font-semibold py-3 rounded-xl text-sm transition"
           >
             {/* GitHub mark SVG */}
             <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
@@ -88,17 +89,17 @@ function LoginForm({ sessionMessage }) {
             Continue with GitHub
           </button>
 
-          <p className="mt-6 text-xs text-gray-400 text-center">
+          <p className="mt-6 text-xs text-text-subtle text-center">
             By continuing, you agree to allow Repo2Reputation to access your GitHub profile and repositories.
           </p>
 
-          <div className="mt-5 pt-5 border-t border-gray-100 text-center">
-            <p className="text-xs text-gray-400 mb-2">Need to use a different GitHub account?</p>
+          <div className="mt-5 pt-5 border-t border-line-subtle text-center">
+            <p className="text-xs text-text-subtle mb-2">Need to use a different GitHub account?</p>
             <a
               href="https://github.com/logout"
               target="_blank"
               rel="noopener noreferrer"
-              className="text-xs text-indigo-500 hover:text-indigo-700 underline"
+              className="text-xs text-brand-500 hover:text-brand-700 underline"
             >
               Sign out of GitHub first →
             </a>

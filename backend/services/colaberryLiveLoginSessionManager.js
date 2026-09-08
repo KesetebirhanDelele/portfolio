@@ -5,7 +5,15 @@ const pool = require('../db/postgres');
 const { encrypt: sharedEncrypt, decrypt: sharedDecrypt } = require('./encryption');
 
 const IMAGE = 'colaberry-live-login';
-const MAX_CONCURRENT_SESSIONS = 5;
+// Was 2 on the original 2 vCPU / 3.7GB host — raised to 4 after the host was
+// resized to 4 vCPU / 7.6GB (measured: ~6.8GB available at idle, 0 swap
+// configured) on 2026-08-18. At --memory=1024m per session, 4 concurrent
+// sessions is up to 4096MB, alongside the heavy-task queue's own memory
+// budget (browserResourceGuard.js, heavyTaskQueue.js) — both still draw from
+// the same host. This preserves the same worst-case-overcommit ratio the
+// original 2-session cap accepted, just scaled to the new capacity. Raise
+// further only after the host gets more RAM or per-session memory drops.
+const MAX_CONCURRENT_SESSIONS = 4;
 const SESSION_TIMEOUT_MS = 10 * 60 * 1000; // matches driver.js's own safety-net timeout
 const SWEEP_INTERVAL_MS = 60 * 1000;
 
@@ -81,11 +89,17 @@ async function startSession(userId, loginUrl) {
     // 512m was too tight for a real Chrome session (renderer + GPU process +
     // network service) navigating a real modern web app — confirmed live on
     // 2026-08-16: Colaberry's actual site OOM-killed the renderer (Chrome's
-    // "Aw, Snap!" page, error code 9 = SIGKILL) mid-login. 1024m is a
-    // conservative doubling, not a precise measurement — revisit if OOM
-    // kills recur even at this limit.
-    '--memory=1024m',
-    '--cpus=1',
+    // "Aw, Snap!" page, error code 9 = SIGKILL) mid-login. 1024m/1 cpu was a
+    // conservative doubling at the time, not a precise measurement. Doubled
+    // again same-day (2026-08-18) to 2048m/2 cpus specifically for a live
+    // demo where a single session needs to start and respond fast, not for
+    // sustained multi-session throughput — MAX_CONCURRENT_SESSIONS (4) times
+    // this new per-session ceiling exceeds total host RAM if ever actually
+    // hit concurrently, an overcommit that's fine for a solo demo run today
+    // but should be revisited (lower this, or lower session count) before
+    // relying on it under real multi-user load.
+    '--memory=2048m',
+    '--cpus=2',
     '-e', `COLABERRY_LOGIN_URL=${loginUrl}`,
     IMAGE,
   ]);

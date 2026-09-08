@@ -95,10 +95,12 @@ function getYearsExperience(linkedin, profile) {
 }
 
 // ─── Sidebar ──────────────────────────────────────────────────────────────────
-function Sidebar({ title, headline, topSkills, githubUsername, profile, engineeringStrengths, careerSignals, repos, repoCount, className = '' }) {
+function Sidebar({ title, headline, topSkills, githubUsername, profile, careerSignals, repos, repoCount, linkedin = null, className = '' }) {
   const grouped     = groupByCategory(topSkills)
   const displayName = profile?.fullName || title || 'Developer'
-  const displayHead = profile?.headline || headline
+  // Resume's own headline wins over the AI-synthesized one when present —
+  // same resume-priority rule as the Professional Summary below (M99).
+  const displayHead = profile?.headline || linkedin?.headline?.trim() || headline
   const initials    = displayName.split(' ').slice(0, 2).map(w => w[0]).join('').toUpperCase()
 
   return (
@@ -174,20 +176,6 @@ function Sidebar({ title, headline, topSkills, githubUsername, profile, engineer
               </a>
             </Row>
           )}
-        </div>
-      )}
-
-      {/* Engineering Strengths */}
-      {engineeringStrengths?.length > 0 && (
-        <div>
-          <Label>Engineering Skills</Label>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '5px' }}>
-            {engineeringStrengths.map((s, i) => (
-              <div key={i} style={{ display: 'flex', alignItems: 'center', gap: '7px', fontSize: '12px', color: '#166534' }}>
-                <span style={{ fontWeight: '700', flexShrink: 0 }}>✓</span>{s}
-              </div>
-            ))}
-          </div>
         </div>
       )}
 
@@ -394,7 +382,7 @@ function Section({ id, icon, title, children, right }) {
 
 
 // ─── Project card ─────────────────────────────────────────────────────────────
-function ProjectCard({ repo, oneLiner, aiDescription }) {
+function ProjectCard({ repo, oneLiner, aiDescription, githubProjectUrl }) {
   const [hov, setHov]                   = useState(false)
   const [expanded, setExpanded]         = useState(false)
   const [gifHov, setGifHov]             = useState(false)
@@ -418,8 +406,23 @@ function ProjectCard({ repo, oneLiner, aiDescription }) {
   const firstAiParagraph = aiParagraphs[0] || null
   const aiHasExtraContent = aiDescription && !(aiRepeatsOverview && aiParagraphs.length === 1)
 
+  // Same three fields, same "positive only" filter as pdfGenerator.js's
+  // basic-pipeline bullet fallback — kept in sync so the PDF and live page
+  // show the same supporting detail. Skip the purpose bullet if it just
+  // restates shortDesc (same dedup reasoning as aiRepeatsOverview above).
+  const purposeBullet = repo.analysis?.highlights?.purpose?.trim() || null
+  const useCasesBullet = repo.analysis?.highlights?.use_cases?.trim() || null
+  const keyTakeawayBullets = (repo.analysis?.keyTakeaways || [])
+    .filter(k => k.status === 'positive')
+    .map(k => k.text)
+  const overviewBullets = [
+    (purposeBullet && shortDesc && purposeBullet === shortDesc.trim()) ? null : purposeBullet,
+    useCasesBullet,
+    ...keyTakeawayBullets,
+  ].filter(Boolean)
+
   const collapseText = shortDesc
-  const hasReadMore = aiHasExtraContent || shortDesc.length > 120
+  const hasReadMore = aiHasExtraContent || overviewBullets.length > 0 || shortDesc.length > 120
   const stars = repo.stars || 0
   const forks = repo.forks || 0
 
@@ -495,22 +498,37 @@ function ProjectCard({ repo, oneLiner, aiDescription }) {
       {/* Details */}
       <div style={{ flex: 1, padding: '14px 16px', minWidth: 0 }}>
 
-        {/* 1. Title — links to GitHub */}
-        <a
-          href={repo.fullName ? `https://github.com/${repo.fullName}` : '#'}
-          target="_blank"
-          rel="noreferrer"
-          style={{
+        {/* 1. Title — links to GitHub only for real GitHub-imported repos.
+               Colaberry-sourced repos store the scraped project title in
+               `fullName` (same value as `name`), not a real "owner/repo"
+               path, so linking unconditionally on fullName produced a
+               broken github.com URL for every Colaberry project — there is
+               no GitHub source repo to link to for those. See PROGRESS.md M92. */}
+        {repo.provider === 'github' && repo.fullName ? (
+          <a
+            href={`https://github.com/${repo.fullName}`}
+            target="_blank"
+            rel="noreferrer"
+            style={{
+              margin: '0 0 6px', padding: 0,
+              fontSize: '15px', fontWeight: '700', color: T, textAlign: 'left',
+              display: 'block', lineHeight: 1.3,
+              textDecoration: 'none',
+              transition: 'color 0.15s',
+            }}
+            className="proj-link"
+          >
+            {formatRepoName(repo.name)}
+          </a>
+        ) : (
+          <p style={{
             margin: '0 0 6px', padding: 0,
             fontSize: '15px', fontWeight: '700', color: T, textAlign: 'left',
-            display: 'block', lineHeight: 1.3,
-            textDecoration: 'none',
-            transition: 'color 0.15s',
-          }}
-          className="proj-link"
-        >
-          {formatRepoName(repo.name)}
-        </a>
+            lineHeight: 1.3,
+          }}>
+            {formatRepoName(repo.name)}
+          </p>
+        )}
 
         {/* 2. Summary — always show overview, expand for full AI analysis */}
         {collapseText && (
@@ -543,6 +561,28 @@ function ProjectCard({ repo, oneLiner, aiDescription }) {
                   {para}
                 </p>
               ))}
+            </div>
+          </div>
+        )}
+
+        {expanded && overviewBullets.length > 0 && (
+          <div style={{ marginBottom: '10px' }}>
+            <div style={{
+              padding: '12px 14px',
+              backgroundColor: '#f8faff',
+              border: `1px solid #e0e7ff`,
+              borderRadius: '8px',
+            }}>
+              <span style={{ fontSize: '10px', fontWeight: '700', color: '#4361ee', textTransform: 'uppercase', letterSpacing: '0.8px', display: 'block', marginBottom: '8px' }}>
+                Highlights
+              </span>
+              <ul style={{ margin: 0, paddingLeft: '16px' }}>
+                {overviewBullets.map((b, i) => (
+                  <li key={i} style={{ fontSize: '12px', color: TS, lineHeight: 1.7, marginBottom: i < overviewBullets.length - 1 ? '4px' : 0 }}>
+                    {b}
+                  </li>
+                ))}
+              </ul>
             </div>
           </div>
         )}
@@ -588,7 +628,7 @@ function ProjectCard({ repo, oneLiner, aiDescription }) {
               {expanded ? 'Show less ↑' : 'Show more ↓'}
             </button>
           )}
-          {repo.fullName && (
+          {repo.provider === 'github' && repo.fullName && (
             <a
               href={`https://github.com/${repo.fullName}`}
               target="_blank"
@@ -601,6 +641,28 @@ function ProjectCard({ repo, oneLiner, aiDescription }) {
               }}
             >
               View on GitHub →
+            </a>
+          )}
+          {/* Colaberry projects have no real GitHub source repo to link to
+              (see the title-link comment above) — but once the portfolio
+              itself has been pushed to GitHub, each project gets a real
+              generated README there. githubProjectUrl is only present once
+              that publish has happened (backend/routes/portfolios.js's
+              public route computes it from content_json.github_publish,
+              which only exists after a successful push). See PROGRESS.md M93. */}
+          {repo.provider === 'colaberry' && githubProjectUrl && (
+            <a
+              href={githubProjectUrl}
+              target="_blank"
+              rel="noreferrer"
+              style={{
+                display: 'inline-flex', alignItems: 'center', gap: '5px',
+                padding: '5px 12px', borderRadius: '6px', fontSize: '11px', fontWeight: '600',
+                border: `1px solid ${BD}`, color: T, backgroundColor: '#fff',
+                textDecoration: 'none',
+              }}
+            >
+              View Full Project →
             </a>
           )}
         </div>
@@ -867,12 +929,17 @@ export default function PublicPortfolio({ slug }) {
 
   const {
     title, headline, narrative, topSkills = [], repos = [], projects = [],
-    publishedAt, engineeringStrengths = [], careerSignals = [], profile = {},
+    publishedAt, careerSignals = [], profile = {},
     linkedin = null,
   } = portfolio
 
-  // Derive GitHub username from any repo fullName (e.g. "username/reponame")
-  const githubUsername = repos.find(r => r.fullName)?.fullName?.split('/')?.[0] || null
+  // Derive GitHub username from a real GitHub-imported repo's fullName
+  // ("owner/reponame") only — Colaberry-sourced repos store the same value
+  // in both `name` and `fullName` (it's a scraped project title, not a
+  // GitHub path; see colaberryImport.js), so without the provider check a
+  // Colaberry-only portfolio would derive a garbage "username" from that
+  // title and build broken github.com links from it. See PROGRESS.md M92.
+  const githubUsername = repos.find(r => r.provider === 'github' && r.fullName)?.fullName?.split('/')?.[0] || null
 
   // Rank repos: highest confidence first, then featured (top 2) first
   const rankedRepos = [...repos].sort((a, b) =>
@@ -925,8 +992,8 @@ export default function PublicPortfolio({ slug }) {
           topSkills={topSkills}
           githubUsername={githubUsername}
           profile={profile}
-          engineeringStrengths={engineeringStrengths}
           careerSignals={careerSignals}
+          linkedin={linkedin}
           repos={repos}
           repoCount={repos.length}
         />
@@ -937,7 +1004,7 @@ export default function PublicPortfolio({ slug }) {
           {/* Mobile profile header — hidden on desktop via CSS */}
           {(() => {
             const displayName = profile?.fullName || title || 'Developer'
-            const displayHead = profile?.headline || headline
+            const displayHead = profile?.headline || linkedin?.headline?.trim() || headline
             const initials    = displayName.split(' ').slice(0, 2).map(w => w[0]).join('').toUpperCase()
             return (
               <div className="pp-mobile-header" style={{
@@ -980,15 +1047,14 @@ export default function PublicPortfolio({ slug }) {
 
           {/* ── Professional Summary ───────────────────────────────── */}
           <Section id="overview" icon="👤" title="Professional Summary">
-            {/* Resume-sourced summary (if a resume was uploaded) takes priority —
-                shown first, in the person's own words, with the repo-derived
-                narrative following as supporting detail rather than replacing it. */}
-            {linkedin?.summary?.trim() && (
-              <p style={{ margin: '0 0 14px', fontSize: '13px', color: TS, lineHeight: 1.7 }}>
-                {linkedin.summary.trim()}
-              </p>
-            )}
-            <SummaryText text={narrative || (linkedin?.summary?.trim() ? '' : 'No summary available.')} />
+            {/* Resume-sourced summary (the person's own words) replaces the
+                AI-synthesized narrative when a resume is on file — not shown
+                alongside it — so there's exactly one summary, not two. Falls
+                back to the AI narrative only when no resume exists. The
+                GitHub-published README (githubPortfolioPublisher.js) applies
+                this identical rule to the same underlying fields, so the two
+                can't diverge. See PROGRESS.md M92. */}
+            <SummaryText text={linkedin?.summary?.trim() || narrative || 'No summary available.'} />
 
             {/* Portfolio Highlights row */}
             <div className="pp-highlights" style={{
@@ -1024,7 +1090,7 @@ export default function PublicPortfolio({ slug }) {
             <Section id="projects" icon="🚀" title="Projects">
               {rankedRepos.map((repo, i) => {
                 const match = projects.find(p => p.repoName === repo.name)
-                return <ProjectCard key={i} repo={repo} oneLiner={match?.oneLiner} aiDescription={match?.description} />
+                return <ProjectCard key={i} repo={repo} oneLiner={match?.oneLiner} aiDescription={match?.description} githubProjectUrl={match?.githubProjectUrl} />
               })}
             </Section>
           )}

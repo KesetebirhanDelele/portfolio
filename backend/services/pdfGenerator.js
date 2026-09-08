@@ -2,6 +2,7 @@
 
 const puppeteer = require('puppeteer');
 const { TECH_CATEGORIES, TECH_LABELS } = require('./techMaps');
+const { guardBrowser, ResourceLimitExceededError } = require('./browserResourceGuard');
 
 async function generatePortfolioPdf(data) {
   const html = buildResumeHtml(data);
@@ -9,6 +10,9 @@ async function generatePortfolioPdf(data) {
     headless: true,
     args: ['--no-sandbox', '--disable-setuid-sandbox'],
   });
+  // Same in-process, no-Docker-ceiling situation as colaberryProjectScraper.js
+  // — see browserResourceGuard.js's header comment.
+  const guard = guardBrowser(browser, { label: 'portfolio-pdf' });
   try {
     const page = await browser.newPage();
     await page.setContent(html, { waitUntil: 'domcontentloaded' });
@@ -18,8 +22,14 @@ async function generatePortfolioPdf(data) {
       margin: { top: '12mm', right: '14mm', bottom: '12mm', left: '14mm' },
     });
     return pdfBuffer;
+  } catch (err) {
+    if (guard.wasKilledForMemory()) {
+      throw new ResourceLimitExceededError('This portfolio was too large to export as a PDF — try trimming project media.');
+    }
+    throw err;
   } finally {
-    await browser.close();
+    guard.stop();
+    await browser.close().catch(() => {});
   }
 }
 
@@ -454,6 +464,27 @@ function buildProjectBlocks(projects, repos) {
       }
     }
 
+    // Priority 4 (basic-pipeline fallback): humanBullets and archBullets both
+    // come exclusively from deep-analysis intelligence/codeIntelligence,
+    // which Colaberry projects never get (they aren't source code — see
+    // PROGRESS.md M47.3/M51) and a GitHub repo won't have yet if its
+    // deep-analysis is still pending or failed. Rather than ship zero
+    // bullets whenever that's the case, fall back to the basic analysis's
+    // own purpose/use-case sentences and its positive key takeaways —
+    // "positive" only, since a "warning" takeaway (e.g. "No code files
+    // detected for implementation") reads as a caveat, not an accomplishment,
+    // and doesn't belong in a portfolio bullet.
+    if (finalBullets.length === 0) {
+      const basicBullets = [
+        repo.analysis?.purpose,
+        repo.analysis?.useCases,
+        ...(repo.analysis?.keyTakeaways || [])
+          .filter(k => k.status === 'positive')
+          .map(k => k.text),
+      ].filter(Boolean).filter(b => !isGenericBullet(b));
+      finalBullets.push(...basicBullets.slice(0, 3));
+    }
+
     // Tech stack: frameworks first (more specific/informative than generic
     // technology tags — "FastAPI" says more than "rest-routes"), then
     // remaining technologies, deduplicated. Capped at 8, not 6 — 6 was
@@ -531,19 +562,29 @@ function buildResumeHtml({
   title, headline, narrative, topSkills = [], projects = [],
   careerSignals = [], repos = [], githubUsername,
   profile = {}, experience = [], education = [], certifications = [],
-  resumeSummary = null,
+  resumeSummary = null, resumeHeadline = null,
 }) {
   const patterns      = allPatterns(repos);
   const skillsByCategory = aggregateSkills(repos, topSkills, patterns);
   const projectBlocks = buildProjectBlocks(projects, repos);
-  // A resume-sourced summary (uploaded LinkedIn PDF) takes priority when
-  // present — shown first, in the person's own words — with the repo-derived
-  // synthesis following as supporting detail rather than replacing it.
+  // A resume-sourced summary (uploaded LinkedIn PDF) replaces the repo-derived
+  // synthesis when present, rather than both being shown stacked — same
+  // resume-only-if-available rule applied consistently on the public
+  // portfolio page and the GitHub-published README (see PROGRESS.md M92).
+  // Note: unlike those two, this repo-derived fallback (buildPersonSummary)
+  // is a separately-templated summary, not narrative.narrative itself — a
+  // pre-existing difference in this PDF path, left as-is here since unifying
+  // the two generation methods is a larger change than this fix's scope.
   const repoSummary   = buildPersonSummary(repos, experience, careerSignals);
-  const summaryParagraphs = [resumeSummary?.trim(), repoSummary].filter(Boolean);
+  const summaryParagraphs = [resumeSummary?.trim() || repoSummary].filter(Boolean);
 
   const displayName     = profile.fullName || title || 'Developer Portfolio';
-  const displayRoleLine = buildProfessionalHeadline(repos, careerSignals, experience, profile.headline || headline);
+  // Resume's own headline wins outright when present — same resume-priority
+  // rule as the summary above (M99). buildProfessionalHeadline's level+domain
+  // inference from repos/careerSignals is a smart guess for when no resume
+  // exists, not something that should override the person's own stated title.
+  const displayRoleLine = resumeHeadline?.trim()
+    || buildProfessionalHeadline(repos, careerSignals, experience, profile.headline || headline);
 
   const contactParts = [
     profile.email       ? esc(profile.email) : null,
