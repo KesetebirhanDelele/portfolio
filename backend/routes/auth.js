@@ -34,8 +34,17 @@ router.get('/github', (req, res) => {
 
   const state = jwt.sign(statePayload, process.env.JWT_SECRET, { expiresIn: '10m' });
   const oauthQuery = {
-    client_id: process.env.GITHUB_CLIENT_ID,
-    scope:     OAUTH_SCOPES,
+    client_id:    process.env.GITHUB_CLIENT_ID,
+    // Explicit, not omitted: with more than one callback URL registered on
+    // this OAuth App (multiple environments/servers sharing one app), GitHub
+    // falls back to an ambiguous default when redirect_uri is left out of
+    // the authorize request — confirmed live during the 2026-09-08 server
+    // migration, where every login attempt landed back on the OLD server
+    // regardless of which one initiated it. Naming it here per-request
+    // means each deployment's own FRONTEND_URL decides where it comes back
+    // to, with no dependency on registration order.
+    redirect_uri: `${frontendUrl}/api/auth/github/callback`,
+    scope:        OAUTH_SCOPES,
     state,
   };
 
@@ -76,6 +85,10 @@ router.get('/github/callback', async (req, res) => {
       client_id:     process.env.GITHUB_CLIENT_ID,
       client_secret: process.env.GITHUB_CLIENT_SECRET,
       code,
+      // Must match whatever redirect_uri (if any) was sent in the
+      // authorize request — see that route's comment. Both sides now name
+      // it explicitly instead of both omitting it.
+      redirect_uri:  `${frontendUrl}/api/auth/github/callback`,
     }, {
       headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
       validateStatus: () => true,
