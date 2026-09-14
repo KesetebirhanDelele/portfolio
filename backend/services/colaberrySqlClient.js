@@ -30,6 +30,19 @@ function getPool() {
 
 // Look up a Colaberry UserID by email — NEVER by a client-supplied ID, so a
 // logged-in R2R user can only ever pull their own Colaberry projects.
+//
+// Falls back to ADF_ColaberryActiveUsers_MP_History when the primary table
+// misses: confirmed live 2026-09-14 that students who go inactive after
+// entering the mentorship/JRP pipeline (e.g. UserID 40156, StatusII
+// "InActive - Activity") drop out of ADF_ColaberryActiveUsers entirely, even
+// though they're genuine former Colaberry students. MP_History keeps one row
+// per monthly mentorship/commission run per student (confirmed ~6.4 rows per
+// distinct email), so TOP 1 + ORDER BY LastRun DESC picks that student's most
+// recent known record instead of an arbitrary historical snapshot. Only
+// 546 of ADF_ColaberryActiveUsers' 3,161 distinct UserIDs also appear in
+// MP_History, so this must stay a fallback, never a replacement — querying
+// MP_History alone would lock out the ~2,615 active students who haven't
+// reached the mentorship phase yet.
 async function getColaberryUserByEmail(email) {
   const pool = await getPool();
   const result = await pool.request()
@@ -39,7 +52,17 @@ async function getColaberryUserByEmail(email) {
       FROM dbo.ADF_ColaberryActiveUsers
       WHERE Email = @email
     `);
-  return result.recordset[0] || null;
+  if (result.recordset[0]) return result.recordset[0];
+
+  const historyResult = await pool.request()
+    .input('email', sql.NVarChar, email)
+    .query(`
+      SELECT TOP 1 UserID, FirstName, LastName, Email
+      FROM dbo.ADF_ColaberryActiveUsers_MP_History
+      WHERE Email = @email
+      ORDER BY LastRun DESC
+    `);
+  return historyResult.recordset[0] || null;
 }
 
 // Project upload links for a verified Colaberry UserID.
