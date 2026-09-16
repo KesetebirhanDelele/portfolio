@@ -6,6 +6,20 @@ This is the real, tested runbook for this app specifically — not a generic tem
 
 ---
 
+## Current access inventory (READ THIS FIRST — updated 2026-09-16)
+
+Two completely separate credential systems are involved in operating this app, and they have different scopes. Confusing them wasted real time in the 2026-09-15/16 sessions — this section exists so that stops happening. Verify current state (`ufw status`, `GET /v1/servers`, etc.) rather than trusting this table blindly if it's been a while since the date above — but as of that date, here's exactly what's usable and what isn't:
+
+| Credential | What it is | Scope / what it CAN do | What it CANNOT do | Status as of 2026-09-16 |
+|---|---|---|---|---|
+| SSH key (`~/.ssh/id_ed25519` on Kes's machine) | Standard OpenSSH keypair, trusted because its public half is in the server's `authorized_keys` | Full root access to whatever's **inside** the server's OS: files, Docker, `.env`, `ufw`/`iptables`, running containers | Cannot touch anything in Hetzner's own infrastructure layer — no creating/deleting servers, no Hetzner Cloud Firewalls, no DNS, no billing/account info. The server has no awareness of the Hetzner Cloud Firewall product; there's nothing "inside" for SSH to reach for that. | **Working.** Confirmed live against `157.180.43.42` (server itself, not Hetzner's control plane). |
+| `HETZNER_API_KEY` (this repo's local `.env`) | A Hetzner Cloud API token, scoped to one specific Hetzner **Project** (not the whole account — a Hetzner login can hold multiple Projects, each with independent servers/firewalls/tokens) | Manage cloud-level resources — create/attach Cloud Firewalls, list/delete servers, check Primary IPs — but only within whichever Project issued it | Cannot see or manage resources in a different Project, even under the same Hetzner login. Cannot log into the server's OS (that's SSH's job, not this). | **Valid but wrong-scoped.** Confirmed working (real data returned, no auth error) against the Project that held firewall `11470214` — but `GET /v1/servers` on that Project returns `[]`, meaning it doesn't currently show `157.180.43.42`. Likely explanation per Kes (2026-09-16): same Hetzner account, but the new server was created in a **different Project** under it — Hetzner Projects, not separate logins, is the actual boundary here. **Kes is generating a fresh token from the correct Project** to replace this. |
+| Hetzner Console (browser login) | N/A | N/A | Claude has no browser session, no username/password, no OAuth token for Hetzner's web Console at all — never has, this isn't a regression | Not available to Claude, ever. Anything needing the Console (e.g. eyeballing which Project a server lives in) needs Kes directly. |
+
+**Practical consequence of the table above**: the Hetzner Cloud Firewall for `157.180.43.42` could not be created via API (wrong-scoped token) or via SSH (wrong system entirely, see the CANNOT column). The mitigation actually applied instead — `ufw` configured directly on the server via SSH (deny-by-default incoming, port 22 restricted to Kes's IP, 80/443 open) — closes the real exposure today, but is not a substitute for the Cloud Firewall long-term (no network-edge layer, no redundancy). See PROGRESS.md M111 for the full record. **Once Kes's new Project-scoped token lands, update this table's `HETZNER_API_KEY` row to "Working" and finish attaching the real Cloud Firewall** (rules below, in "Troubleshooting: Recovering SSH Access").
+
+---
+
 ## Architecture decisions (why the setup looks the way it does)
 
 ### URL topology: one origin, path-based routing
@@ -296,17 +310,23 @@ If `ssh root@$SERVER` (or `ssh deploy@$SERVER`) suddenly stops working — conne
 curl -4 ifconfig.me    # your current IPv4 — the ONLY thing that changes on your end
 ```
 
-Compare against what the firewall currently allows (needs `HETZNER_API_KEY` from `.env` — never print the key itself, only use it in the `Authorization` header). **Firewall ID `11470214` below is the current server's** — once the migration to a new server (see "Path to real production" section) is complete and the old server is decommissioned, this whole section needs re-pointing at the new firewall's own ID:
+**Update (2026-09-15): the migration this note warned about has happened, and `11470214` is now stale.** Production moved to a new server, `157.180.43.42` (M107, 2026-09-08). The old server (`46.62.228.67`, firewall `11470214`) is **no longer this project's server at all** — live-verified 2026-09-15 that it now serves a different app entirely (TLS cert `CN=eventgenius.m-dev.me`). Do not use firewall `11470214` or IP `46.62.228.67` for anything below.
+
+**Update (2026-09-16, M111): the missing-firewall gap above is now mitigated, not fully closed.** No Hetzner Cloud Firewall is attached to `157.180.43.42` yet (still true — see "Current access inventory" near the top of this file for exactly why: the local `HETZNER_API_KEY` is valid but scoped to a different Hetzner Project than the one `157.180.43.42` lives in, so it can't create one; a new Project-scoped token is pending). In the meantime, `ufw` was configured directly on the server via SSH — default-deny incoming, port 22 restricted to Kes's IP, 80/443 open — which closes the actual exposure today. **Correction to earlier phrasing**: this was described mid-investigation as "a separate Hetzner account" — Kes's recollection (and the more likely explanation) is it's the *same* account/login, just a different Hetzner **Project** within it, which is where API tokens are actually scoped. Don't re-litigate "which account" again; check the access-inventory table at the top of this file instead, and update it once the new token confirms which is true.
+
+Once a real Cloud Firewall exists on the new server (via the new Project-scoped token, or Kes creating it directly in the Console), the same recovery pattern applies — replace `11470214` and `$HETZNER_API_KEY` usage below with the new server's real firewall ID:
 
 ```bash
-curl -s https://api.hetzner.cloud/v1/firewalls/11470214 \
+curl -4 ifconfig.me    # your current IPv4
+
+curl -s https://api.hetzner.cloud/v1/firewalls/<NEW_FIREWALL_ID> \
   -H "Authorization: Bearer $HETZNER_API_KEY" | grep -A3 '"port": "22"'
 ```
 
-If `source_ips` doesn't contain your current IP, that's the entire problem — nothing wrong with your key, your password, or the server. Fix it with one API call (replace `<YOUR_IP>` — and note this `set_rules` call REPLACES the entire ruleset, so 80/443 must be included every time, not just 22, or you'll silently lock out the live site while fixing SSH):
+If `source_ips` doesn't contain your current IP, that's the entire problem — nothing wrong with your key, your password, or the server. Fix it with one API call (replace `<YOUR_IP>` and `<NEW_FIREWALL_ID>` — and note this `set_rules` call REPLACES the entire ruleset, so 80/443 must be included every time, not just 22, or you'll silently lock out the live site while fixing SSH):
 
 ```bash
-curl -s -X POST https://api.hetzner.cloud/v1/firewalls/11470214/actions/set_rules \
+curl -s -X POST https://api.hetzner.cloud/v1/firewalls/<NEW_FIREWALL_ID>/actions/set_rules \
   -H "Authorization: Bearer $HETZNER_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"rules": [
@@ -322,7 +342,9 @@ Wait ~15 seconds for `apply_firewall` to finish, then retry SSH with your normal
 
 ### Step 2: Also double-check you're targeting the right server
 
-Before assuming it's a firewall or key problem at all, confirm the IP you're using matches what the Hetzner Console shows for `ubuntu-4gb-hel1-1` right now (Console → Servers → the server row shows its current Public IP). Server IPs don't normally change on their own, but documentation can go stale — this repo's own `CLAUDE.md` had the wrong IP for a while (fixed 2026-08-16). If in doubt, trust the Hetzner Console over any doc, including this one.
+Before assuming it's a firewall or key problem at all, confirm the IP you're using matches what the Hetzner Console shows for the current production server right now (Console → Servers → the server row shows its current Public IP). Server IPs don't normally change on their own, but documentation can go stale — this repo's own `CLAUDE.md` had the wrong IP for a while (fixed 2026-08-16, then again 2026-09-15 after the 2026-09-08 server migration). If in doubt, trust the Hetzner Console over any doc, including this one. **Also verify you're on the right account/project**: the 2026-09-08 migration (M107) created a brand-new Hetzner account, so the old server's console/API key won't even show the new one — don't assume "I don't see it" means it was deleted.
+
+**A second, sharper version of this same check, learned 2026-09-15**: a matching IP and a live TLS handshake are not proof it's still *this* app's server — an IP can be reassigned to an entirely different customer/project after a server is deleted. Before trusting any cached IP from a doc or memory, confirm the live content: `curl https://<ip-or-nip.io-host>/api/health` should return this app's `{"status":"healthy","checks":{"postgres":...,"colaberryMssql":...}}` shape, and the TLS cert's `CN` (`openssl s_client -connect <ip>:443 -servername <host> | openssl x509 -noout -subject`) should match the hostname you expect. This is exactly how `46.62.228.67` was caught having silently become `eventgenius.m-dev.me`'s server, not this app's.
 
 ### Step 3 (only if the firewall is fine and the IP is right, and you still can't get in): password/console recovery
 
@@ -339,7 +361,7 @@ Only reach for this if steps 1-2 didn't fix it — e.g. you've genuinely lost ev
 
 ### Reference: what's actually authorized right now
 
-Despite `deployment.md`'s "One-time setup" section describing a dedicated `hetzner_portfolio` key as the intended setup, in practice `~/.ssh/id_ed25519` (Kes's regular default key) is what's authorized on the server as of 2026-08-16. No `hetzner_portfolio` key currently exists on Kes's machine. Worth actually doing the dedicated-key setup next time SSH access is touched, so a compromised personal key doesn't also expose this server — but don't assume it's already done.
+Despite `deployment.md`'s "One-time setup" section describing a dedicated `hetzner_portfolio` key as the intended setup, in practice `~/.ssh/id_ed25519` (Kes's regular default key) is what was authorized on the **old** server (`46.62.228.67`) as of 2026-08-16. That server is no longer this project's (see the 2026-09-15 update above) — this note has **not been re-verified against the new server (`157.180.43.42`)** and shouldn't be trusted for it without checking `authorized_keys` there directly. Worth actually doing the dedicated-key setup next time SSH access is touched, so a compromised personal key doesn't also expose this server — but don't assume it's already done.
 
 ## Backups
 
@@ -360,7 +382,7 @@ Always back up before a schema-changing migration.
 - [ ] Database/Redis/JWT/encryption secrets are fresh, not copied from dev
 - [ ] `FRONTEND_URL` matches the real server address
 - [ ] GitHub OAuth Redirect URI matches `FRONTEND_URL`
-- [ ] Hetzner Firewall: only 22 (your IP), 80 and 443 (any) open
+- [ ] Hetzner Firewall: only 22 (your IP), 80 and 443 (any) open — **currently FAILS on the live production server (`157.180.43.42`)**: as of 2026-09-08 (M107) no firewall is attached at all, every port open; this needs fixing, not just checking, next time anyone touches this server
 - [ ] `docker compose ps` shows all services healthy
 - [ ] `docker compose logs migrate` shows a clean exit
 - [ ] Colaberry SQL Server reachability confirmed
@@ -376,7 +398,9 @@ What's live today (raw IP, personal accounts, single server) is a real, working 
 
 **Update (2026-08-16): TLS is live, but via a stopgap, not a real domain.** Plain HTTP turned out to be more than cosmetic — it silently broke the Colaberry live-login feature outright (noVNC refuses to run outside a secure context; see `PROGRESS.md` M74–M77 for the full diagnosis). Rather than block that fix on the domain decision below, shipped TLS immediately using `46.62.228.67.nip.io` — `nip.io` resolves any `<ip>.nip.io` hostname straight back to that IP, which lets Let's Encrypt's HTTP-01 challenge complete with no domain purchase, no DNS setup, and no waiting on anyone's decision. The cert is genuinely trusted (no browser warning), auto-renews via certbot's systemd timer, and `FRONTEND_URL`/the GitHub OAuth App's callback URL were both updated to match. nginx now terminates TLS on 443 and redirects all plain-HTTP traffic (including bare-IP hits) to the HTTPS origin.
 
-This does **not** resolve the question below — `nip.io` is a third-party dependency the app now soft-relies on for its hostname, and it's explicitly a stopgap: swap the cert path in `frontend/nginx.conf` for a real domain's cert whenever that decision lands, no re-architecting needed.
+**Update (2026-09-08, M107): server migrated, same nip.io stopgap, new IP.** Production moved to `157.180.43.42`; the live HTTPS origin is now `157.180.43.42.nip.io` (same nip.io mechanism as above — that hostname is nothing but the IP itself, wrapped so Let's Encrypt will issue it a real cert). `frontend/nginx.conf`'s cert paths and `FRONTEND_URL` were repointed accordingly. `46.62.228.67`/`46.62.228.67.nip.io` are retired for this project — confirmed 2026-09-15 that IP now serves a different, unrelated app.
+
+This does **not** resolve the question below — `nip.io` is a third-party dependency the app now soft-relies on for its hostname, and it's explicitly a stopgap: swap the cert path in `frontend/nginx.conf` for a real domain's cert whenever that decision lands, no re-architecting needed. It also means any future server migration repeats this same nip.io re-bootstrap step, which a real domain would avoid entirely (the A record would just get repointed instead).
 
 Real institutional use still needs:
 - A real domain/subdomain (e.g. `portfolio.colaberry.com`) with a DNS **A record** pointed at the server.

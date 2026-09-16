@@ -628,7 +628,7 @@ Claude may assume:
 - VS Code / VSCodium / Cursor may be used
 - Git is present
 - CI runs automated tests where they exist (manual testing is the current default for most surfaces)
-- Production VPS access is via `ssh root@46.62.228.67` (Hetzner `ubuntu-4gb-hel1-1`) to the stack at `/opt/portfolio`. SSH is firewall-restricted to Kes's current IP — see `deployment.md`'s "Operational commands" section if a firewall update is needed. Deploys are `su - deploy -c 'cd /opt/portfolio && git pull origin infra/containerize-app && docker compose up -d --build'` (see `deployment.md` for the full runbook; this repo isn't on `main` yet, per the standing PR-gate rule).
+- Production VPS access is via `ssh root@157.180.43.42` to the stack at `/opt/portfolio`. **Updated 2026-09-15**: this replaces `46.62.228.67`, which was this app's server through the 2026-09-08 migration (M106-M108) but is no longer under Colaberry/Kes's control — live-verified that IP now serves an unrelated app (`eventgenius.m-dev.me`'s TLS cert), so it must never be used for this project again, not even as a fallback. Deploys are `su - deploy -c 'cd /opt/portfolio && git pull origin infra/containerize-app && docker compose up -d --build'` (see `deployment.md` for the full runbook). **Before assuming what Claude can/can't access on Hetzner's side (Cloud Firewalls, DNS, server management — as opposed to SSH into the box itself), read `deployment.md`'s "Current access inventory" section first** — SSH access and the `HETZNER_API_KEY` Cloud API token are two separate credential systems with different scopes, and conflating them burned real time in the 2026-09-15/16 sessions.
 
 Claude must NOT assume:
 - Moltbot exists
