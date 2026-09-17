@@ -43,6 +43,18 @@ function getPool() {
 // MP_History, so this must stay a fallback, never a replacement — querying
 // MP_History alone would lock out the ~2,615 active students who haven't
 // reached the mentorship phase yet.
+//
+// StatusII exclusion added per Ali 2026-09-16: MP_History's most-recent-row
+// pick shouldn't admit someone whose latest status means they were never a
+// genuine, paying, active-or-completed student — confirmed live distinct
+// values (grouped by StatusII) before writing this filter, exact strings:
+// "Inactive - Lack of payment" (1,661 rows), "Inactive - Quit" (78 rows),
+// "Registered" (3,608 rows — signed up, never actually started). Excluding
+// these from the WHERE clause (not post-filtering the TOP-1 result) means
+// LastRun DESC picks the most recent *qualifying* row, so a student with an
+// earlier genuine status and a later "Registered" artifact still admits
+// correctly. Every other status (active, completed, lapsed-but-was-real,
+// etc.) stays admitted, matching Ali's "graduates, placed, and lapsed" intent.
 async function getColaberryUserByEmail(email) {
   const pool = await getPool();
   const result = await pool.request()
@@ -60,6 +72,7 @@ async function getColaberryUserByEmail(email) {
       SELECT TOP 1 UserID, FirstName, LastName, Email
       FROM dbo.ADF_ColaberryActiveUsers_MP_History
       WHERE Email = @email
+        AND StatusII NOT IN (N'Inactive - Lack of payment', N'Inactive - Quit', N'Registered')
       ORDER BY LastRun DESC
     `);
   return historyResult.recordset[0] || null;

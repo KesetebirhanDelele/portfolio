@@ -5,7 +5,7 @@ const crypto  = require('crypto');
 const jwt     = require('jsonwebtoken');
 const pool    = require('../db/postgres');
 const { encryptGithubToken } = require('../services/githubTokenCrypto');
-const { getColaberryUserByEmail } = require('../services/colaberrySqlClient');
+const { isColaberryLoginAllowed } = require('../services/colaberryAccessGate');
 
 const router = express.Router();
 
@@ -167,11 +167,15 @@ router.get('/github/callback', async (req, res) => {
     let hasColaberryAccount = false;
     try {
       for (const email of verifiedEmails) {
-        if (await getColaberryUserByEmail(email)) { hasColaberryAccount = true; break; }
+        if (await isColaberryLoginAllowed(email)) { hasColaberryAccount = true; break; }
       }
     } catch (err) {
       // Fail closed: an SQL Server outage must not silently grant access as
-      // if verification had passed — that would defeat the whole gate.
+      // if verification had passed — that would defeat the whole gate. Note
+      // this only covers the SQL tiers throwing: the enterprise lookup
+      // (checked first, inside isColaberryLoginAllowed) fails OPEN on its
+      // own errors instead of throwing, by design — see
+      // enterpriseEnrollmentClient.js.
       console.error('[auth/github] Colaberry account check failed:', err.message);
       return res.redirect(`${frontendUrl}/auth/callback?error=colaberry_check_failed`);
     }
